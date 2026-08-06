@@ -1,6 +1,7 @@
 import dataclasses
 import enum
 import logging
+import pathlib
 import socket
 
 import tyro
@@ -96,9 +97,26 @@ def create_policy(args: Args) -> _policy.Policy:
             return create_default_policy(args.env, default_prompt=args.default_prompt)
 
 
+def _checkpoint_id(checkpoint_dir: str) -> str:
+    """Identifies a checkpoint by its last two path components, e.g. "my_experiment/30000".
+
+    Deliberately not the full path: this metadata is sent to every client that connects, and the
+    server's filesystem layout is not something they need to know.
+    """
+    parts = pathlib.PurePosixPath(checkpoint_dir.replace("\\", "/").rstrip("/")).parts
+    return "/".join(parts[-2:])
+
+
 def main(args: Args) -> None:
     policy = create_policy(args)
-    policy_metadata = policy.metadata
+    # args.policy is Default() when serving a default policy, so read the checkpoint that
+    # create_policy() actually resolved rather than assuming it was passed on the command line.
+    checkpoint = args.policy if isinstance(args.policy, Checkpoint) else DEFAULT_CHECKPOINT[args.env]
+    policy_metadata = {
+        **(policy.metadata or {}),
+        "config": checkpoint.config,
+        "checkpoint": _checkpoint_id(checkpoint.dir),
+    }
 
     # Record the policy's behavior.
     if args.record:
