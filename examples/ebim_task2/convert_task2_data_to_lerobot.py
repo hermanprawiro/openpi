@@ -21,11 +21,14 @@ do not generalize across scene placements.
 
 Episodes labeled success=false in task2_extras/episodes_task2.jsonl are skipped by default.
 
-Usage:
+Usage (see examples/ebim_task2/README.md for the canonical dataset ids):
 uv run examples/ebim_task2/convert_task2_data_to_lerobot.py \
-    --raw-dir /path/to/ebim/benchmark/task2_isaacsim/dataset/task2_thermalpad_v2
+    --raw-repo-id <hf-user>/<raw-dataset> --repo-id <output-repo-id>
+or, from a local raw recording:
+uv run examples/ebim_task2/convert_task2_data_to_lerobot.py \
+    --raw-dir /path/to/raw/dataset --repo-id <output-repo-id>
 
-The resulting dataset is saved to $HF_LEROBOT_HOME/<repo_id>.
+The resulting dataset is saved to $HF_LEROBOT_HOME/<repo-id>.
 """
 
 import os
@@ -35,9 +38,11 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import json
 import pathlib
+import re
 import shutil
 
 import av
+import huggingface_hub
 import numpy as np
 import pyarrow.parquet as pq
 import tyro
@@ -60,6 +65,12 @@ RESIZE_BATCH = 64
 # observation.state indices for the 20-dim state matching the action layout:
 # base vel vx,vy,wz | left joints 1-7 | right joints 1-7 | left grip | right grip | spine
 STATE_INDICES = [34, 35, 36, *range(14, 21), *range(21, 28), 29, 30, 28]
+
+
+def normalize_hf_repo_id(raw_repo_id: str) -> str:
+    """Accepts a plain repo id ('org/name') or a full URL ('https://huggingface.co/datasets/org/name')."""
+    match = re.match(r"https?://huggingface\.co/datasets/([^/]+/[^/?#]+)", raw_repo_id)
+    return match.group(1) if match else raw_repo_id
 
 
 def load_success_labels(raw_dir: pathlib.Path) -> dict[int, bool]:
@@ -106,13 +117,33 @@ def resize_frames(frames: np.ndarray) -> np.ndarray:
 
 
 def main(
-    raw_dir: str,
     repo_id: str,
     *,
+    raw_dir: str | None = None,
+    raw_repo_id: str | None = None,
+    max_episodes: int | None = None,
     include_failed: bool = False,
     push_to_hub: bool = False,
 ):
-    raw_path = pathlib.Path(raw_dir)
+    """Converts the raw LeRobot v3.0 task2 dataset to the v2.1 format used by openpi.
+
+    Args:
+        repo_id: Output repo id; the converted dataset is written to $HF_LEROBOT_HOME/<repo_id>.
+        raw_dir: Local directory containing the raw v3.0 dataset. Mutually exclusive with raw_repo_id.
+        raw_repo_id: Hugging Face dataset to download (repo id or full URL). Mutually exclusive with raw_dir.
+        max_episodes: If set, stop after converting this many (successful) episodes.
+        include_failed: Also convert episodes labeled success=false.
+        push_to_hub: Push the converted dataset to the Hugging Face hub.
+    """
+    if (raw_dir is None) == (raw_repo_id is None):
+        raise ValueError("Provide exactly one of --raw-dir (local path) or --raw-repo-id (Hugging Face dataset).")
+    if raw_dir is not None:
+        raw_path = pathlib.Path(raw_dir)
+    else:
+        assert raw_repo_id is not None
+        raw_path = pathlib.Path(
+            huggingface_hub.snapshot_download(repo_id=normalize_hf_repo_id(raw_repo_id), repo_type="dataset")
+        )
     info = json.loads((raw_path / "meta" / "info.json").read_text())
     fps = info["fps"]
 
@@ -163,6 +194,9 @@ def main(
 
     num_written = 0
     for ep in episodes:
+        if max_episodes is not None and num_written >= max_episodes:
+            print(f"Reached --max-episodes={max_episodes}, stopping.")
+            break
         ep_index = ep["episode_index"]
         if not include_failed and not success.get(ep_index, True):
             print(f"Skipping episode {ep_index} (success=false)")

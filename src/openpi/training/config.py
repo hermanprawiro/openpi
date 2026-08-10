@@ -752,64 +752,44 @@ _CONFIGS = [
         ema_decay=None,
     ),
     TrainConfig(
-        name="pi0_ebim_task2_low_mem_finetune",
+        name="pi0_ebim_task2_fixpos_200_finetune",
         # LoRA fine-tuning of pi0 on the EBIM task2 thermal-pad dataset (fits on a 24 GB GPU).
-        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        model=pi0_config.Pi0Config(
+            pi05=False,
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"
+        ),
         data=LeRobotEbimTask2DataConfig(
-            repo_id="ebim/task2_thermalpad",
+            repo_id="ebim/task2_fixpos_200",
             base_config=DataConfig(prompt_from_task=True),
+            use_delta_actions=True,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
-        num_train_steps=30_000,
-        freeze_filter=pi0_config.Pi0Config(
-            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
-        ).get_freeze_filter(),
-        ema_decay=None,
-    ),
-    TrainConfig(
-        name="pi05_ebim_task2_low_mem_finetune",
-        # LoRA fine-tuning of pi0.5 on the EBIM task2 thermal-pad dataset (fits on a 24 GB GPU).
-        # pi0.5 feeds the (normalized) state in as discrete language tokens and predicts absolute
-        # joint targets, so unlike the pi0 config above we do *not* apply the delta-action transform.
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-        ),
-        data=LeRobotEbimTask2DataConfig(
-            repo_id="ebim/task2_thermalpad",
-            base_config=DataConfig(prompt_from_task=True),
-            use_delta_actions=False,
-        ),
         batch_size=16,
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
         freeze_filter=pi0_config.Pi0Config(
-            pi05=True,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
+            pi05=False,
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
         # Turn off EMA for LoRA finetuning.
         ema_decay=None,
     ),
     TrainConfig(
-        name="pi05_ebim_task2_baseline_finetune",
-        # LoRA fine-tuning of pi0.5 on the EBIM task2 baseline_v1 dataset (50 episodes, 77k frames).
-        # Same robot, cameras and 20-dim layout as the thermal-pad configs above, so it reuses the
-        # same data config and policy transforms -- only the converted dataset differs.
+        name="pi05_ebim_task2_fixpos_200_finetune",
         model=pi0_config.Pi0Config(
             pi05=True,
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
         ),
         data=LeRobotEbimTask2DataConfig(
-            repo_id="ebim/task2_baseline_v1",
+            repo_id="ebim/task2_fixpos_200",
             base_config=DataConfig(prompt_from_task=True),
             # pi0.5 predicts absolute joint targets, which is what the dataset records.
             use_delta_actions=False,
         ),
-        batch_size=16,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=16,
         num_train_steps=30_000,
         freeze_filter=pi0_config.Pi0Config(
             pi05=True,
@@ -820,56 +800,22 @@ _CONFIGS = [
         ema_decay=None,
     ),
     TrainConfig(
-        name="pi05_ebim_task2_baseline_v2_finetune",
-        # LoRA fine-tuning of pi0.5 on the EBIM task2 baseline_v2 dataset (80 episodes, 127k frames;
-        # a superset of baseline_v1 merged with task2_thermalpad_v4). Identical to the baseline_v1
-        # config above apart from the dataset -- kept as a separate config so the baseline_v1
-        # checkpoints keep resolving to their own norm stats.
+        name="pi05_ebim_task2_fixpos_200_full_finetune",
         model=pi0_config.Pi0Config(
             pi05=True,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
         ),
         data=LeRobotEbimTask2DataConfig(
-            repo_id="ebim/task2_baseline_v2",
+            repo_id="ebim/task2_fixpos_200",
             base_config=DataConfig(prompt_from_task=True),
             # pi0.5 predicts absolute joint targets, which is what the dataset records.
             use_delta_actions=False,
         ),
-        batch_size=16,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=32,
         num_train_steps=30_000,
-        freeze_filter=pi0_config.Pi0Config(
-            pi05=True,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-        ).get_freeze_filter(),
-        # Turn off EMA for LoRA finetuning.
-        ema_decay=None,
-    ),
-    TrainConfig(
-        name="pi05_ebim_task2_fixpos_v1_finetune",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-        ),
-        data=LeRobotEbimTask2DataConfig(
-            repo_id="ebim/task2_fixpos_v1",
-            base_config=DataConfig(prompt_from_task=True),
-            # pi0.5 predicts absolute joint targets, which is what the dataset records.
-            use_delta_actions=False,
-        ),
-        batch_size=16,
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=30_000,
-        freeze_filter=pi0_config.Pi0Config(
-            pi05=True,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-        ).get_freeze_filter(),
-        # Turn off EMA for LoRA finetuning.
-        ema_decay=None,
+        ema_decay=0.99,
     ),
     TrainConfig(
         name="pi0_fast_libero",
