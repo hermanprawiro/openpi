@@ -33,6 +33,7 @@ class Policy(BasePolicy):
         metadata: dict[str, Any] | None = None,
         pytorch_device: str = "cpu",
         is_pytorch: bool = False,
+        model_config: _model.BaseModelConfig | None = None,
     ):
         """Initialize the Policy.
 
@@ -46,8 +47,11 @@ class Policy(BasePolicy):
             pytorch_device: Device to use for PyTorch models (e.g., "cpu", "cuda:0").
                           Only relevant when is_pytorch=True.
             is_pytorch: Whether the model is a PyTorch model. If False, assumes JAX model.
+            model_config: The config the model was created from. Only used by `warmup`, which
+                needs it to build a fake observation with the model's input spec.
         """
         self._model = model
+        self._model_config = model_config
         self._input_transform = _transforms.compose(transforms)
         self._output_transform = _transforms.compose(output_transforms)
         self._sample_kwargs = sample_kwargs or {}
@@ -104,6 +108,44 @@ class Policy(BasePolicy):
             "infer_ms": model_time * 1000,
         }
         return outputs
+
+    def warmup(self) -> float | None:
+        """Runs one throwaway sampling pass so the first real `infer` call doesn't pay for JIT.
+
+        For JAX models, `sample_actions` is compiled by XLA on its first call, which can take tens
+        of seconds. Calling this after the checkpoint is loaded moves that cost to startup instead
+        of to the first client request. PyTorch models don't compile, but the pass still pays the
+        one-off costs of allocating workspaces and selecting cuDNN kernels.
+
+        The fake observation is built from the model's input spec, so it has the same shapes and
+        dtypes the input transforms produce for a real observation and therefore hits the same
+        compilation cache entry. Note that `infer` calls that pass explicit `noise` use a different
+        signature and will compile again on their first call.
+
+        Returns:
+            The elapsed time in seconds, or None if no model config was provided.
+        """
+        if self._model_config is None:
+            logging.warning("Skipping warmup: policy was created without a model config.")
+            return None
+
+        observation = self._model_config.fake_obs(batch_size=1)
+        if self._is_pytorch_model:
+            observation = jax.tree.map(lambda x: torch.from_numpy(np.asarray(x)).to(self._pytorch_device), observation)
+            sample_rng_or_pytorch_device = self._pytorch_device
+        else:
+            # A throwaway key, so warming up doesn't shift the key sequence that infer() consumes.
+            sample_rng_or_pytorch_device = jax.random.key(0)
+
+        start_time = time.monotonic()
+        actions = self._sample_actions(sample_rng_or_pytorch_device, observation, **self._sample_kwargs)
+        if self._is_pytorch_model:
+            if "cuda" in str(self._pytorch_device):
+                torch.cuda.synchronize()
+        else:
+            # JAX dispatch is async, so block to make sure compilation actually finished.
+            jax.block_until_ready(actions)
+        return time.monotonic() - start_time
 
     @property
     def metadata(self) -> dict[str, Any]:

@@ -52,6 +52,10 @@ class Args:
     # Record the policy's behavior for debugging.
     record: bool = False
 
+    # Run one throwaway inference before serving so that JIT compilation happens at startup instead
+    # of during the first client request. Pass --no-warmup to skip it and start serving sooner.
+    warmup: bool = True
+
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
 
@@ -117,6 +121,17 @@ def main(args: Args) -> None:
         "config": checkpoint.config,
         "checkpoint": _checkpoint_id(checkpoint.dir),
     }
+
+    if args.warmup:
+        logging.info("Warming up policy (compiling the model, this can take a while)...")
+        try:
+            elapsed = policy.warmup()
+        except Exception:
+            # Warmup is only an optimization, so don't let a failure here keep the server down.
+            logging.exception("Policy warmup failed; the first inference request will be slow.")
+        else:
+            if elapsed is not None:
+                logging.info("Warmup done in %.1f s", elapsed)
 
     # Record the policy's behavior.
     if args.record:
