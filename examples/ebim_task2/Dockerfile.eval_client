@@ -1,0 +1,23 @@
+# Eval client for the EBiM task2 Isaac Sim benchmark.
+# Build from the openpi repo root (it copies packages/openpi-client):
+#   docker build -f examples/ebim_task2/Dockerfile.eval_client -t ebim-task2-eval-client .
+FROM ros:jazzy-ros-base
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3-pip ros-jazzy-rosgraph-msgs \
+    && rm -rf /var/lib/apt/lists/*
+
+# --break-system-packages: Debian marks the system python as
+# externally-managed; this image is single-purpose so installing into it
+# is fine. typing_extensions is a real (undeclared) openpi-client dep.
+COPY packages/openpi-client /tmp/openpi-client
+RUN pip3 install --no-cache-dir --break-system-packages \
+        /tmp/openpi-client typing_extensions pyyaml \
+    && rm -rf /tmp/openpi-client
+
+COPY examples/ebim_task2/eval_client /opt/eval_client/eval_client
+COPY examples/ebim_task2/eval_config.yaml /opt/eval_client/eval_config.yaml
+COPY examples/ebim_task2/fake_obs_client.py /opt/eval_client/fake_obs_client.py
+WORKDIR /opt/eval_client
+
+CMD ["bash", "-c", "source /opt/ros/jazzy/setup.bash && exec python3 -m eval_client.main --config eval_config.yaml"]

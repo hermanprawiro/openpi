@@ -1,0 +1,38 @@
+# Default settings for the EBiM task2 policy eval client
+# (examples/ebim_task2/eval_client/). Keys mirror the CLI flags;
+# precedence: dataclass defaults < this file < explicit CLI flags.
+# Point the client at another file with --config.
+#
+# Server connection (host/port/api key) does NOT belong here: set
+# POLICY_SERVER_HOST / POLICY_SERVER_PORT / POLICY_SERVER_API_KEY in the
+# environment or in examples/ebim_task2/.env (see .env.example). This
+# file is dumped into the eval-result artifact; the connection settings
+# are kept out of it.
+num_episodes: 10
+# Episode length in simulated seconds on the 30 Hz control grid.
+episode_timeout: 90.0
+# Must match the training dataset's task string (prompt_from_task=True).
+prompt: "Pick up the thermal pad and place it on the target RAM board."
+replan_steps: 50
+pedal_threshold: 0.25
+
+# LeRobot-style async inference (the primary mode): a worker thread
+# queries the policy server while the control loop keeps executing queued
+# actions. --no-async-inference selects the sync baseline (blocking infer
+# every replan_steps). Success rates are NOT comparable across modes:
+# async replans more often at the same threshold.
+async_inference: true
+chunk_size_threshold: 0.4      # request when queue <= threshold * horizon
+async_execute_horizon: 50      # null -> replan_steps
+queue_dry_abort_steps: 90      # ~3 sim-seconds of held commands
+# replace: drop the old plan. blend_* average the step-aligned overlap of
+# old queue and fresh chunk: blend_uniform 0.5/0.5, blend_favor_new
+# 0.3/0.7, blend_favor_old 0.7/0.3 (old/new weights).
+chunk_merge: blend_uniform
+
+# Websocket reconnect budget per episode before the episode aborts.
+max_reconnects: 3
+# Publish one last scene-reset request after the final episode so the
+# eval_recorder scores it (the recorder evaluates on each reset request).
+final_reset: true
+out_dir: eval_results
