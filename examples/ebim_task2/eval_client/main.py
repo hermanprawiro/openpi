@@ -11,7 +11,6 @@ Usage (inside a ROS 2 Jazzy environment with openpi-client installed):
 """
 
 import logging
-import time
 
 import rclpy
 
@@ -62,10 +61,10 @@ def main() -> None:
             cfg.chunk_merge,
         )
 
-    layout = results.run_layout(cfg.out_dir, int(time.time()))
+    layout = results.run_layout(cfg.out_dir, cfg.run_name)
     # redacted: host/port/api_key stay out of the shareable eval artifact
     results.dump_run_config(layout.config_path, cfg.redacted_dict(), server_metadata)
-    logging.info("Writing results to %s", layout.results_path)
+    logging.info("Run %s: writing results to %s", layout.run_dir.name, layout.results_path)
 
     try:
         handled_resets = node.reset_count()

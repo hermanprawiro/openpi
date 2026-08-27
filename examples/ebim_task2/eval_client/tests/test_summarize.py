@@ -1,0 +1,102 @@
+"""Tests for summarize_eval.py (examples/ebim_task2/, on sys.path via conftest)."""
+
+import json
+
+import pytest
+import summarize_eval
+
+
+def _write_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _evaluator_result(iou, *, orientation_ok, call_index=1):
+    return {
+        "success": True,
+        "trigger": "reset_request",
+        "sim_time": 88.5,
+        "call_index": call_index,
+        "iou": {
+            "iou_thermalpad_vs_target_current": iou,
+            "is_orientation_correct": orientation_ok,
+            "orientation_case": "aligned" if orientation_ok else "flipped",
+            "orientation_confidence": 0.9,
+            "evaluator_version": "v5",
+            "physical_audit": {"coverage": 0.8, "spill": 0.01, "off_board": False},
+        },
+    }
+
+
+@pytest.fixture
+def session_dir(tmp_path):
+    session = tmp_path / "session"
+    session.mkdir()
+    _write_json(session / ".status.json", {"ts": 1, "state": "watching", "resets": 3})
+    _write_json(session / ".session_provenance.json", {"wall_time_utc": "2026-08-26T10:00:00Z"})
+
+    ep1 = session / "ep_001"
+    _write_json(ep1 / "manifest.json", {"discarded": False, "start_reset_event": {"target_slot": "slot_a"}})
+    _write_json(ep1 / "evaluator" / "call_001" / "evaluator_result.json", _evaluator_result(0.72, orientation_ok=True))
+    art = ep1 / "evaluator" / "call_001" / "artifacts"
+    art.mkdir(parents=True)
+    (art / "eval_camera_rgb_000123.jpg").write_bytes(b"fakejpegdata")
+
+    ep2 = session / "ep_002"
+    _write_json(ep2 / "manifest.json", {"discarded": False})
+    _write_json(ep2 / "evaluator" / "call_001" / "evaluator_result.json", _evaluator_result(0.10, orientation_ok=False))
+
+    # Trailing episode: opened by the client's final reset, discarded by the wrapper.
+    ep3 = session / "ep_003"
+    _write_json(ep3 / "manifest.json", {"discarded": True})
+    return session
+
+
+@pytest.fixture
+def run_dir(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    records = [
+        {"episode": 0, "aborted": False, "steps": 120, "duration_s": 45.6, "infer_ms_mean": 480.0},
+        {"episode": 1, "aborted": True, "abort_reason": "stale streams", "steps": 10, "duration_s": 3.2},
+    ]
+    with open(run / "result.jsonl", "w", encoding="utf-8") as f:
+        for rec in records:
+            f.write(json.dumps(rec) + "\n")
+    return run
+
+
+class TestWriteSummary:
+    def test_writes_markdown_with_merged_rows(self, session_dir, run_dir):
+        out = summarize_eval.write_summary(session_dir, run_dir)
+        assert out == run_dir / "summary.md"
+        text = out.read_text(encoding="utf-8")
+        assert "ep_001" in text
+        assert "0.7200" in text  # evaluator IoU
+        assert "120" in text  # client steps
+        assert "stale streams" in text  # client abort reason
+
+    def test_discarded_episode_excluded_from_stats(self, session_dir, run_dir):
+        text = summarize_eval.write_summary(session_dir, run_dir).read_text(encoding="utf-8")
+        assert "| Episodes recorded | 2 |" in text
+        assert "discarded" in text.lower()  # footnote mentions the skipped episode
+
+    def test_images_copied_into_run_dir(self, session_dir, run_dir):
+        text = summarize_eval.write_summary(session_dir, run_dir).read_text(encoding="utf-8")
+        copied = run_dir / "images" / "ep_001.jpg"
+        assert copied.is_file()
+        assert copied.read_bytes() == b"fakejpegdata"
+        assert "](images/ep_001.jpg)" in text
+
+    def test_count_mismatch_warns(self, session_dir, run_dir):
+        lines = (run_dir / "result.jsonl").read_text(encoding="utf-8").splitlines()
+        (run_dir / "result.jsonl").write_text(lines[0] + "\n", encoding="utf-8")
+        text = summarize_eval.write_summary(session_dir, run_dir).read_text(encoding="utf-8")
+        assert "WARNING" in text
+
+    def test_missing_result_jsonl_degrades_gracefully(self, session_dir, tmp_path):
+        empty_run = tmp_path / "empty_run"
+        empty_run.mkdir()
+        text = summarize_eval.write_summary(session_dir, empty_run).read_text(encoding="utf-8")
+        assert "ep_001" in text
+        assert "WARNING" in text

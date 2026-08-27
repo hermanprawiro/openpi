@@ -36,3 +36,7 @@ max_reconnects: 3
 # eval_recorder scores it (the recorder evaluates on each reset request).
 final_reset: true
 out_dir: eval_results
+# Shared run name: results land in eval_results/<run_name> instead of
+# eval_results/eval_<unix-ts>. Normally set per-run by run_eval.sh
+# (--run-name via EVAL_ARGS) so client and eval_recorder artifacts pair up.
+# run_name: null

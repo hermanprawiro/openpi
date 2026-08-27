@@ -112,11 +112,14 @@ Kill and restart the server mid-run to exercise the reconnect path.
 
 ## Outputs
 
-`eval_results/eval_<unix-ts>/`:
+`eval_results/<run-name>/` (default `eval_<unix-ts>` when `--run-name` is
+not set; `run_eval.sh` passes one so client and recorder artifacts share it):
 - `config.yaml` — resolved config + the server's checkpoint metadata
 - `result.jsonl` — one line per episode: steps, duration, infer latency,
   async stats (chunk latency, dry steps, queue depth, merges dropped),
   abort reason if any
+- `summary.md` + `images/` — merged report (evaluator scores + client
+  timing), written by `summarize_eval.py` / `run_eval.sh`
 
 Scores and videos live in the eval_recorder's output
 (`services/eval_recording/eval_raw_out/<eval-name>/`).

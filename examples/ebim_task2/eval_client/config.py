@@ -10,6 +10,7 @@ import argparse
 import dataclasses
 import os
 from pathlib import Path
+import re
 
 from eval_client.chunking import CHUNK_MERGE_STRATEGIES
 from eval_client.constants import DEFAULT_PROMPT
@@ -21,6 +22,10 @@ _CLI_ONLY_KEYS = {"config"}
 # YAML, and are excluded from the config.yaml written into eval results
 # (that artifact may be shared; see redacted_dict).
 CONNECTION_KEYS = ("host", "port", "api_key")
+# One path component, no whitespace: the name is used verbatim as a directory
+# name here and as the recorder's --eval-name, and must survive EVAL_ARGS
+# word-splitting in docker compose.
+RUN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def load_dotenv(path: Path) -> None:
@@ -61,9 +66,14 @@ class EvalConfig:
     max_reconnects: int = 3
     final_reset: bool = True
     out_dir: Path = Path("eval_results")
+    run_name: str | None = None
 
     def __post_init__(self):
         self.out_dir = Path(self.out_dir)
+        if self.run_name is not None and not RUN_NAME_RE.match(self.run_name):
+            raise ValueError(
+                f"run_name must match {RUN_NAME_RE.pattern} (single path component, no spaces), got {self.run_name!r}"
+            )
         if self.chunk_merge not in CHUNK_MERGE_STRATEGIES:
             raise ValueError(f"chunk_merge must be one of {sorted(CHUNK_MERGE_STRATEGIES)}, got {self.chunk_merge!r}")
         if not 0.0 <= self.chunk_size_threshold < 1.0:
@@ -115,7 +125,7 @@ def _build_parser() -> argparse.ArgumentParser:
         flag = "--" + name.replace("_", "-")
         if isinstance(default, bool):
             parser.add_argument(flag, dest=name, action=argparse.BooleanOptionalAction, default=default)
-        elif name in ("api_key",):
+        elif name in ("api_key", "run_name"):
             parser.add_argument(flag, dest=name, default=default)
         elif name == "async_execute_horizon":
             parser.add_argument(flag, dest=name, type=int, default=default)

@@ -23,6 +23,9 @@ services:
       - HOME=/tmp  # host uid has no passwd entry in the container
     volumes:
       - ./eval_results:/opt/eval_client/eval_results
+      # Mounted over the copy baked into the image so edits to the config
+      # take effect without a rebuild.
+      - ./eval_config.yaml:/opt/eval_client/eval_config.yaml:ro
     command: >
       bash -c "source /opt/ros/jazzy/setup.bash &&
       exec python3 -m eval_client.main --config eval_config.yaml ${EVAL_ARGS:-}"

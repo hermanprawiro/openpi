@@ -3,6 +3,7 @@
 import dataclasses
 import json
 from pathlib import Path
+import time
 
 import numpy as np
 
@@ -14,9 +15,16 @@ class RunLayout:
     config_path: Path
 
 
-def run_layout(out_dir: Path, run_stamp: int) -> RunLayout:
-    run_dir = Path(out_dir) / f"eval_{run_stamp}"
-    run_dir.mkdir(parents=True, exist_ok=True)
+def run_layout(out_dir: Path, run_name: str | None) -> RunLayout:
+    run_dir = Path(out_dir) / (run_name or f"eval_{int(time.time())}")
+    try:
+        run_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        # Appending to an existing result.jsonl would restart episode
+        # numbering and config.yaml would be overwritten.
+        raise FileExistsError(
+            f"run dir already exists: {run_dir} -- pick a new --run-name or remove the old run"
+        ) from None
     return RunLayout(
         run_dir=run_dir,
         results_path=run_dir / "result.jsonl",

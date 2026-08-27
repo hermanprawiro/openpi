@@ -1,18 +1,34 @@
 import json
 from pathlib import Path
+import re
 
 from eval_client import results
 import numpy as np
+import pytest
 import yaml
 
 
 class TestRunLayout:
     def test_paths(self, tmp_path):
-        layout = results.run_layout(tmp_path / "out", 1234)
+        layout = results.run_layout(tmp_path / "out", "eval_1234")
         assert layout.run_dir == tmp_path / "out" / "eval_1234"
         assert layout.results_path == layout.run_dir / "result.jsonl"
         assert layout.config_path == layout.run_dir / "config.yaml"
         assert layout.run_dir.is_dir()
+
+    def test_explicit_name_used_verbatim(self, tmp_path):
+        layout = results.run_layout(tmp_path / "out", "my_submission")
+        assert layout.run_dir.name == "my_submission"
+
+    def test_none_falls_back_to_timestamp(self, tmp_path):
+        layout = results.run_layout(tmp_path / "out", None)
+        assert re.fullmatch(r"eval_\d+", layout.run_dir.name)
+        assert layout.run_dir.is_dir()
+
+    def test_existing_run_dir_raises(self, tmp_path):
+        results.run_layout(tmp_path / "out", "dup")
+        with pytest.raises(FileExistsError, match="already exists"):
+            results.run_layout(tmp_path / "out", "dup")
 
 
 class TestAppendResult:

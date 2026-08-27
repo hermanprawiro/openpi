@@ -818,6 +818,30 @@ _CONFIGS = [
         ema_decay=0.99,
     ),
     TrainConfig(
+        name="pi05_lora_ebim_task2_fixpos_200_and_v5",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotEbimTask2DataConfig(
+            repo_id="ebim/task2_fixpos_200_and_v5",
+            base_config=DataConfig(prompt_from_task=True),
+            # pi0.5 predicts absolute joint targets, which is what the dataset records.
+            use_delta_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=16,
+        num_train_steps=30_000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
+    ),
+    TrainConfig(
         name="pi0_fast_libero",
         # Here is an example of loading a pi0-FAST model for full finetuning.
         # Modify action_dim and action_horizon to match your dataset (action horizon is equal to

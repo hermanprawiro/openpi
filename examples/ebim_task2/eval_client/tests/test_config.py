@@ -42,6 +42,7 @@ class TestDefaults:
         assert cfg.final_reset is True
         assert cfg.pedal_threshold == 0.25
         assert cfg.out_dir == Path("eval_results")
+        assert cfg.run_name is None
 
     def test_env_host_port(self, config_file, monkeypatch):
         monkeypatch.setenv("POLICY_SERVER_HOST", "10.0.0.7")
@@ -74,6 +75,33 @@ class TestPrecedence:
         path = config_file("{}")
         assert EvalConfig.from_cli(["--config", path, "--no-async-inference"]).async_inference is False
         assert EvalConfig.from_cli(["--config", config_file("async_inference: false\n")]).async_inference is False
+
+
+class TestRunName:
+    def test_cli_flag(self, config_file):
+        cfg = EvalConfig.from_cli(["--config", config_file("{}"), "--run-name", "foo_01"])
+        assert cfg.run_name == "foo_01"
+
+    def test_yaml_value(self, config_file):
+        cfg = EvalConfig.from_cli(["--config", config_file("run_name: foo\n")])
+        assert cfg.run_name == "foo"
+
+    def test_cli_overrides_yaml(self, config_file):
+        cfg = EvalConfig.from_cli(["--config", config_file("run_name: foo\n"), "--run-name", "bar"])
+        assert cfg.run_name == "bar"
+
+    def test_yaml_null_keeps_default(self, config_file):
+        cfg = EvalConfig.from_cli(["--config", config_file("run_name: null\n")])
+        assert cfg.run_name is None
+
+    def test_invalid_name_fails_via_cli(self, config_file):
+        with pytest.raises(ValueError, match="run_name"):
+            EvalConfig.from_cli(["--config", config_file("{}"), "--run-name", "a/b"])
+
+    @pytest.mark.parametrize("bad", ["a/b", "", "-x", "a b", ".hidden"])
+    def test_invalid_names_fail(self, bad):
+        with pytest.raises(ValueError, match="run_name"):
+            EvalConfig(run_name=bad)
 
 
 class TestValidation:
