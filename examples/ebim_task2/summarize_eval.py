@@ -324,6 +324,8 @@ def render_summary(
     durations = [v for v in durations if v is not None]
     infers = [_as_float(r.get("infer_ms_mean")) for r in records]
     infers = [v for v in infers if v is not None]
+    jumps = [_as_float(r.get("switch_jump_max")) for r in records]
+    jumps = [v for v in jumps if v is not None]
 
     lines += [
         "| Metric | Value |",
@@ -346,6 +348,7 @@ def render_summary(
         f"| Mean steps per episode | {_num(statistics.fmean(steps) if steps else None, '{:.1f}')} |",
         f"| Mean episode duration (s) | {_num(statistics.fmean(durations) if durations else None, '{:.1f}')} |",
         f"| Mean inference latency (ms) | {_num(statistics.fmean(infers) if infers else None, '{:.1f}')} |",
+        f"| Mean hand-off jump, max per episode (rad) | {_num(statistics.fmean(jumps) if jumps else None)} |",
         "",
     ]
 
@@ -390,6 +393,7 @@ def _client_cells(ep: Episode) -> str:
         f"{_num(_as_float(rec.get('steps')), '{:.0f}')} | "
         f"{_num(_as_float(rec.get('duration_s')), '{:.1f}')} | "
         f"{_num(_as_float(rec.get('infer_ms_mean')), '{:.1f}')} | "
+        f"{_num(_as_float(rec.get('switch_jump_max')))} | "
         f"{aborted}"
     )
 
@@ -399,15 +403,15 @@ def render_tables(episodes: list[Episode]) -> list[str]:
         "## Episode tables",
         "",
         "One row per episode; evaluator columns come from the recorder, the "
-        "client columns (steps / duration / inference / aborted) from "
+        "client columns (steps / duration / inference / jump / aborted) from "
         "result.jsonl. When an episode was evaluated more than once, the row "
         "shows the call with the highest IoU; every call is listed in the "
         "per-call table below.",
         "",
         "| Episode | Calls | Call used | Trigger | IoU | Orient. correct | Orient. case | "
         "Orient. conf | Coverage | Spill | Off-board | Status | Steps | Duration (s) | "
-        "Infer (ms) | Aborted |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "Infer (ms) | Jump (rad) | Aborted |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for ep in episodes:
         c = ep.best

@@ -144,7 +144,10 @@ resolved name, artifact dirs and commands without starting anything.
 What you should see, per episode: `Episode k/10: resetting scene` →
 (recorder logs the reset + auto-evaluation of the previous episode) →
 ~90 sim-seconds of motion → `Episode k result: {...}` with steps ≈ 2700,
-`queue_dry_steps` near 0, `aborted: false`. After episode 10 the client
+`queue_dry_steps` near 0, `aborted: false` (`switch_jump_max`, the largest
+arm-joint jump at a chunk hand-off in rad, is the number to compare when
+changing `chunk_merge`; see `docs/chunk_merge_strategies.md`). After
+episode 10 the client
 publishes one final reset request so the recorder scores the last episode.
 
 Artifacts (paired by the shared name):

@@ -61,7 +61,9 @@ def run_sync(client: PolicyClient, steps: int, rng) -> None:
 def run_async(client: PolicyClient, steps: int, args, rng) -> None:
     worker = InferenceWorker(client)
     worker.start()
-    buffer = AsyncChunkBuffer(args.replan_steps, args.chunk_size_threshold, args.chunk_merge)
+    buffer = AsyncChunkBuffer(
+        args.replan_steps, args.chunk_size_threshold, args.chunk_merge, blend_steps=args.chunk_blend_steps
+    )
     infer_ms = []
     failures = 0
     step_period = 1.0 / CONTROL_HZ
@@ -119,6 +121,7 @@ def main() -> None:
     parser.add_argument("--replan-steps", type=int, default=25)
     parser.add_argument("--chunk-size-threshold", type=float, default=0.5)
     parser.add_argument("--chunk-merge", choices=sorted(CHUNK_MERGE_STRATEGIES), default="replace")
+    parser.add_argument("--chunk-blend-steps", type=int, default=10)
     parser.add_argument("--max-reconnects", type=int, default=3)
     args = parser.parse_args()
 

@@ -21,14 +21,21 @@ pedal_threshold: 0.25
 # actions. --no-async-inference selects the sync baseline (blocking infer
 # every replan_steps). Success rates are NOT comparable across modes:
 # async replans more often at the same threshold.
-async_inference: true
+async_inference: false
 chunk_size_threshold: 0.4      # request when queue <= threshold * horizon
 async_execute_horizon: 50      # null -> replan_steps
 queue_dry_abort_steps: 90      # ~3 sim-seconds of held commands
-# replace: drop the old plan. blend_* average the step-aligned overlap of
-# old queue and fresh chunk: blend_uniform 0.5/0.5, blend_favor_new
-# 0.3/0.7, blend_favor_old 0.7/0.3 (old/new weights).
-chunk_merge: blend_uniform
+# How an arriving chunk is reconciled with the not-yet-executed queue
+# (docs/chunk_merge_strategies.md). replace: drop the old plan. blend_*:
+# fixed-weight average of the step-aligned overlap (blend_uniform 0.5/0.5,
+# blend_favor_new 0.3/0.7, blend_favor_old 0.7/0.3 old/new weights).
+# crossfade: old->new weight ramp over chunk_blend_steps rows. offset_decay:
+# adopt the fresh plan shifted to be continuous with the next queued action,
+# shift decayed over chunk_blend_steps rows (recommended). Base twist and
+# gripper dims are never interpolated. Compare strategies via the
+# switch_jump_* / step_jump_* fields (rad) in result.jsonl.
+chunk_merge: replace
+chunk_blend_steps: 10          # hand-off window for crossfade / offset_decay
 
 # Websocket reconnect budget per episode before the episode aborts.
 max_reconnects: 3

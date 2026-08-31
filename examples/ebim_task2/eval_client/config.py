@@ -62,6 +62,7 @@ class EvalConfig:
     chunk_size_threshold: float = 0.5
     async_execute_horizon: int | None = None
     chunk_merge: str = "replace"
+    chunk_blend_steps: int = 10
     queue_dry_abort_steps: int = 90
     max_reconnects: int = 3
     final_reset: bool = True
@@ -76,6 +77,8 @@ class EvalConfig:
             )
         if self.chunk_merge not in CHUNK_MERGE_STRATEGIES:
             raise ValueError(f"chunk_merge must be one of {sorted(CHUNK_MERGE_STRATEGIES)}, got {self.chunk_merge!r}")
+        if self.chunk_blend_steps < 1:
+            raise ValueError(f"chunk_blend_steps must be >= 1, got {self.chunk_blend_steps}")
         if not 0.0 <= self.chunk_size_threshold < 1.0:
             raise ValueError(f"chunk_size_threshold must be in [0.0, 1.0), got {self.chunk_size_threshold}")
         if self.replan_steps < 1:

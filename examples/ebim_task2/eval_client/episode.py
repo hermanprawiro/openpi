@@ -160,7 +160,9 @@ def run_episode_async(node, worker, cfg, generation: int) -> dict:
     longer stalls the grid."""
     from eval_client.chunking import AsyncChunkBuffer
 
-    buffer = AsyncChunkBuffer(cfg.execute_horizon, cfg.chunk_size_threshold, cfg.chunk_merge)
+    buffer = AsyncChunkBuffer(
+        cfg.execute_horizon, cfg.chunk_size_threshold, cfg.chunk_merge, blend_steps=cfg.chunk_blend_steps
+    )
     step_period = 1.0 / CONTROL_HZ
     t0 = node.sim_now()
     if t0 is None:

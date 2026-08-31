@@ -93,8 +93,20 @@ EVAL_ARGS="--num-episodes 1 --no-async-inference" docker compose ... run --rm ev
   loop keeps publishing queued actions on the 30 Hz sim-time grid. A new
   chunk is requested when the queue drops to
   `chunk_size_threshold × execute_horizon`; arriving chunks skip the rows
-  made stale by inference latency and merge via `chunk_merge`
-  (`replace`, `blend_uniform`, `blend_favor_new`, `blend_favor_old`).
+  made stale by inference latency and merge via `chunk_merge`:
+  - `replace` — drop the old plan (jumps at every hand-off);
+  - `blend_uniform` / `blend_favor_new` / `blend_favor_old` — fixed-weight
+    average of the step-aligned overlap (0.5/0.5, 0.3/0.7, 0.7/0.3 old/new);
+  - `crossfade` — old→new weight ramp over `chunk_blend_steps` rows;
+  - `offset_decay` — adopt the fresh plan, shifted to be continuous with
+    the next queued action, shift decayed over `chunk_blend_steps` rows
+    (recommended).
+
+  Base twist and gripper dims are never interpolated. Each episode record
+  reports `switch_jump_mean/max` (arm-joint jump at the first action after
+  a merge, rad) and `step_jump_mean/max` (between consecutive actions) for
+  comparing strategies. Background, formulas and the strategies surveyed
+  but not implemented: [docs/chunk_merge_strategies.md](docs/chunk_merge_strategies.md).
 - **Sync** (`--no-async-inference`): blocking infer every `replan_steps`
   steps; the control grid re-anchors after each inference gap.
 

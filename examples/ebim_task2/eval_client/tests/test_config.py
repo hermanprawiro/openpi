@@ -37,6 +37,7 @@ class TestDefaults:
         assert cfg.chunk_size_threshold == 0.5
         assert cfg.async_execute_horizon is None
         assert cfg.chunk_merge == "replace"
+        assert cfg.chunk_blend_steps == 10
         assert cfg.queue_dry_abort_steps == 90
         assert cfg.max_reconnects == 3
         assert cfg.final_reset is True
@@ -59,9 +60,12 @@ class TestDefaults:
 
 class TestPrecedence:
     def test_yaml_overrides_defaults(self, config_file):
-        cfg = EvalConfig.from_cli(["--config", config_file("num_episodes: 3\nchunk_merge: blend_uniform\n")])
+        cfg = EvalConfig.from_cli(
+            ["--config", config_file("num_episodes: 3\nchunk_merge: offset_decay\nchunk_blend_steps: 6\n")]
+        )
         assert cfg.num_episodes == 3
-        assert cfg.chunk_merge == "blend_uniform"
+        assert cfg.chunk_merge == "offset_decay"
+        assert cfg.chunk_blend_steps == 6
 
     def test_cli_overrides_yaml(self, config_file):
         cfg = EvalConfig.from_cli(["--config", config_file("num_episodes: 3\n"), "--num-episodes", "7"])
@@ -116,6 +120,10 @@ class TestValidation:
     def test_bad_merge_name_fails(self, config_file):
         with pytest.raises(ValueError, match="chunk_merge"):
             EvalConfig.from_cli(["--config", config_file("chunk_merge: nope\n")])
+
+    def test_bad_blend_steps_fails(self, config_file):
+        with pytest.raises(ValueError, match="chunk_blend_steps"):
+            EvalConfig.from_cli(["--config", config_file("chunk_blend_steps: 0\n")])
 
     def test_bad_threshold_fails(self, config_file):
         with pytest.raises(ValueError, match="chunk_size_threshold"):

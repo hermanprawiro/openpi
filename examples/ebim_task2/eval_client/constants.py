@@ -12,6 +12,14 @@ CONTROL_HZ = 30.0
 STATE_DIM = 20
 ACTION_DIM = 20
 CHUNK_LEN = 50
+# Action layout (see actions.split_action): base twist 0-2 | left arm 3-9 |
+# right arm 10-16 | grippers 17-18 | spine 19. Arm joints (rad) are the
+# only dims whose step-to-step jumps are meaningful to measure; spine (m)
+# is also a continuous absolute target. Base twist is quantized to pedal
+# tokens and the grippers are effectively binary, so chunk merges never
+# interpolate them: they always take the fresh chunk's value.
+ARM_ACTION_DIMS = tuple(range(3, 17))
+BLEND_ACTION_DIMS = (*ARM_ACTION_DIMS, 19)
 IMAGE_SIZE = 224
 OBS_STALE_S = 2.0
 

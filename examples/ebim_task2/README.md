@@ -12,6 +12,8 @@ described in the [technical reference](#technical-reference) below):
 | `pi05_ebim_task2_fixpos_200_finetune` **(default)** | `pi05_base` | LoRA | absolute (as recorded) | 24 GB |
 | `pi0_ebim_task2_fixpos_200_finetune` | `pi0_base` | LoRA | delta arm joints + spine | 24 GB |
 | `pi05_ebim_task2_fixpos_200_full_finetune` | `pi05_base` | full (EMA on) | absolute (as recorded) | 80 GB-class |
+| `pi05_lora_ebim_task2_fixpos_200_and_v5` | `pi05_base` | LoRA | absolute (as recorded) | 24 GB |
+| `pi05_lora_ebim_task2_fixpos_200_and_v5_from_fft` | `pi05_ebim_task2_fixpos_200_full_finetune` @ step 29999 | LoRA | absolute (as recorded) | 24 GB |
 
 The walkthrough below uses the default pi0.5 LoRA config; for the alternatives just swap the
 config name (everything else is identical).

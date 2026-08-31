@@ -57,7 +57,15 @@ def run_dir(tmp_path):
     run = tmp_path / "run"
     run.mkdir()
     records = [
-        {"episode": 0, "aborted": False, "steps": 120, "duration_s": 45.6, "infer_ms_mean": 480.0},
+        {
+            "episode": 0,
+            "aborted": False,
+            "steps": 120,
+            "duration_s": 45.6,
+            "infer_ms_mean": 480.0,
+            "switch_jump_max": 0.0312,
+            "switch_jump_mean": 0.0104,
+        },
         {"episode": 1, "aborted": True, "abort_reason": "stale streams", "steps": 10, "duration_s": 3.2},
     ]
     with open(run / "result.jsonl", "w", encoding="utf-8") as f:
@@ -75,6 +83,15 @@ class TestWriteSummary:
         assert "0.7200" in text  # evaluator IoU
         assert "120" in text  # client steps
         assert "stale streams" in text  # client abort reason
+
+    def test_handoff_jump_metric_reported(self, session_dir, run_dir):
+        text = summarize_eval.write_summary(session_dir, run_dir).read_text(encoding="utf-8")
+        assert "| Mean hand-off jump, max per episode (rad) | 0.0312 |" in text
+        assert "| Jump (rad) |" in text  # per-episode client column
+        ep1_row = next(line for line in text.splitlines() if line.startswith("| `ep_001`"))
+        assert "| 0.0312 |" in ep1_row
+        ep2_row = next(line for line in text.splitlines() if line.startswith("| `ep_002`"))
+        assert "| - | yes: stale streams" in ep2_row  # aborted episode has no jump stats
 
     def test_discarded_episode_excluded_from_stats(self, session_dir, run_dir):
         text = summarize_eval.write_summary(session_dir, run_dir).read_text(encoding="utf-8")
