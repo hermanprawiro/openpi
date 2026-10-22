@@ -30,6 +30,9 @@ from typing import Any
 
 EP_RE = re.compile(r"ep_(\d+)")
 CALL_RE = re.compile(r"call_(\d+)")
+# The sim labels the four board slots A-D; "B" is where the target board is
+# authored, so the other slots measure generalization to unseen positions.
+HOME_SLOT = "B"
 
 
 # --------------------------------------------------------------------------- #
@@ -104,6 +107,11 @@ class Call:
         return self.iou if self.orientation_ok else 0.0
 
     @property
+    def placed(self) -> bool:
+        """Successful attempt: the pad overlaps the target (IoU > 0) the right way up."""
+        return self.ok and self.iou is not None and self.iou > 0 and bool(self.orientation_ok)
+
+    @property
     def failure_reason(self) -> str:
         msg = (self.raw.get("message") or "").strip()
         return msg.splitlines()[0] if msg else "no message"
@@ -140,6 +148,11 @@ class Episode:
         if best is None or not best.ok:
             return "evaluator failed"
         return "ok"
+
+    @property
+    def success(self) -> bool:
+        best = self.best
+        return best is not None and best.placed
 
     @property
     def discarded(self) -> bool:
@@ -339,6 +352,8 @@ def render_summary(
         f"| Median IoU (evaluated episodes) | {_num(statistics.median(vals) if vals else None)} |",
         f"| Episodes with IoU > 0 | {sum(1 for v in vals if v > 0)} / {len(vals)} |",
         f"| Orientation correct | {len(oriented)} / {len(evaluated)} |",
+        f"| Successful episodes (IoU > 0 and orientation correct) | "
+        f"{sum(1 for e in episodes if e.success)} / {len(episodes)} |",
         max_score_cell,
         f"| Mean physical coverage | {_num(statistics.fmean(coverages) if coverages else None)} |",
         f"| Mean physical spill | {_num(statistics.fmean(spills) if spills else None)} |",
@@ -362,6 +377,8 @@ def render_summary(
             "",
         ]
 
+    lines += render_slot_table(episodes)
+
     problems = [e for e in episodes if e.status != "ok"]
     if problems:
         lines += ["Episodes without a usable result:", ""]
@@ -378,6 +395,37 @@ def render_summary(
             "",
         ]
 
+    return lines
+
+
+def render_slot_table(episodes: list[Episode]) -> list[str]:
+    """Success (IoU > 0 and orientation correct) per target-board slot. Every
+    recorded episode counts as an attempt, so one without a usable evaluator
+    result is a failure."""
+
+    def row(label: str, eps: list[Episode]) -> str:
+        wins = sum(1 for e in eps if e.success)
+        rate = f"{wins / len(eps):.0%}" if eps else "-"
+        return f"| {label} | {wins} | {len(eps)} | {rate} |"
+
+    by_slot: dict[str, list[Episode]] = {}
+    for ep in episodes:
+        by_slot.setdefault(ep.target_slot or "-", []).append(ep)
+    lines = [
+        "### Success by target slot",
+        "",
+        "Success = IoU > 0 and orientation correct. `-` = no slot recorded for the episode.",
+        "",
+        "| Slot | Successes | Episodes | Success rate |",
+        "| --- | --- | --- | --- |",
+    ]
+    for slot in sorted(by_slot, key=lambda s: (s == "-", s)):
+        label = f"{_esc(slot)} (home)" if slot == HOME_SLOT else _esc(slot)
+        lines.append(row(label, by_slot[slot]))
+    if HOME_SLOT in by_slot:
+        others = [e for slot, eps in by_slot.items() if slot not in (HOME_SLOT, "-") for e in eps]
+        lines.append(row(f"Other than {HOME_SLOT}", others))
+    lines += [row("**All**", episodes), ""]
     return lines
 
 
@@ -404,23 +452,28 @@ def render_tables(episodes: list[Episode]) -> list[str]:
         "",
         "One row per episode; evaluator columns come from the recorder, the "
         "client columns (steps / duration / inference / jump / aborted) from "
-        "result.jsonl. When an episode was evaluated more than once, the row "
+        "result.jsonl. Slot is the target board's slot for the episode; Success = "
+        "IoU > 0 and orientation correct. When an episode was evaluated more than once, the row "
         "shows the call with the highest IoU; every call is listed in the "
         "per-call table below.",
         "",
-        "| Episode | Calls | Call used | Trigger | IoU | Orient. correct | Orient. case | "
-        "Orient. conf | Coverage | Spill | Off-board | Status | Steps | Duration (s) | "
-        "Infer (ms) | Jump (rad) | Aborted |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| Episode | Slot | Calls | Call used | Trigger | Success | IoU | Orient. correct | "
+        "Orient. case | Orient. conf | Coverage | Spill | Off-board | Status | Steps | "
+        "Duration (s) | Infer (ms) | Jump (rad) | Aborted |",
+        "| " + " | ".join(["---"] * 19) + " |",
     ]
     for ep in episodes:
         c = ep.best
+        slot = _esc(ep.target_slot)
         if c is None:
-            lines.append(f"| `{ep.name}` | 0 | - | - | - | - | - | - | - | - | - | {ep.status} | {_client_cells(ep)} |")
+            lines.append(
+                f"| `{ep.name}` | {slot} | 0 | - | - | no | - | - | - | - | - | - | - | "
+                f"{ep.status} | {_client_cells(ep)} |"
+            )
             continue
         lines.append(
-            f"| `{ep.name}` | {len(ep.calls)} | {c.index} | {_esc(c.trigger)} | "
-            f"{_num(c.iou)} | {_bool(c.orientation_ok)} | {_esc(c.orientation_case)} | "
+            f"| `{ep.name}` | {slot} | {len(ep.calls)} | {c.index} | {_esc(c.trigger)} | "
+            f"{_bool(ep.success)} | {_num(c.iou)} | {_bool(c.orientation_ok)} | {_esc(c.orientation_case)} | "
             f"{_num(c.orientation_conf)} | {_num(c.coverage)} | {_num(c.spill)} | "
             f"{_bool(c.off_board)} | {ep.status} | {_client_cells(ep)} |"
         )
@@ -432,7 +485,7 @@ def render_tables(episodes: list[Episode]) -> list[str]:
             "### Per-call detail (episodes with more than one evaluator call)",
             "",
             "| Episode | Call | Trigger | Sim time | IoU | Orient. correct | Orient. case | "
-            "Orient. conf | Coverage | Spill | Off-board | Success |",
+            "Orient. conf | Coverage | Spill | Off-board | Evaluator ok |",
             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
         for ep in multi:

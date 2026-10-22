@@ -90,6 +90,8 @@ cd $EBIM
   real-time factor (~0.2×: a 90 sim-second episode ≈ 7 wall minutes).
 - Object randomization (`--randomize-objects`) re-jitters on **every**
   scene reset, i.e. per episode.
+- For policy trained with fixpos dataset, add `--robot-x 2.1 --robot-y 3.05` to
+  mimic the robot starting position during training.
 
 Loading takes several minutes. Ready when the observation topics are live:
 
@@ -191,8 +193,10 @@ Without `--run-name` the client falls back to `eval_results/eval_<unix-ts>/`.
 ## 6. After the run
 
 - Read `eval_results/<name>/summary.md` first: aggregate stats, one row
-  per episode (evaluator scores + client timing/aborts), and the
-  eval-camera frame per episode. Official protocol is best-of-10.
+  per episode (target slot, success, evaluator scores + client
+  timing/aborts), a success-by-target-slot table (success = IoU > 0 and
+  orientation correct; slots other than the home slot `B` measure position
+  generalization), and the eval-camera frame per episode. Official protocol is best-of-10.
 - Source of truth remains the raw recorder output
   (`ep_NNN/evaluator/call_NNN/`); `summarize_eval.py` can be re-run on any
   old session. The trailing recorder episode is intentionally marked

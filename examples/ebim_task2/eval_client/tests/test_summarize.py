@@ -117,3 +117,29 @@ class TestWriteSummary:
         text = summarize_eval.write_summary(session_dir, empty_run).read_text(encoding="utf-8")
         assert "ep_001" in text
         assert "WARNING" in text
+
+    def test_slot_and_success_columns(self, session_dir, run_dir):
+        text = summarize_eval.write_summary(session_dir, run_dir).read_text(encoding="utf-8")
+        assert "| Episode | Slot | Calls | Call used | Trigger | Success | IoU |" in text
+        rows = text.splitlines()
+        ep1_row = next(line for line in rows if line.startswith("| `ep_001`"))
+        assert ep1_row.startswith("| `ep_001` | slot_a | 1 | 1 | reset_request | yes | 0.7200 |")
+        # IoU > 0 but wrong orientation is not a success; no recorded slot renders as "-".
+        ep2_row = next(line for line in rows if line.startswith("| `ep_002`"))
+        assert ep2_row.startswith("| `ep_002` | - | 1 | 1 | reset_request | no | 0.1000 |")
+
+    def test_success_by_slot_table(self, session_dir, run_dir):
+        text = summarize_eval.write_summary(session_dir, run_dir).read_text(encoding="utf-8")
+        assert "| Successful episodes (IoU > 0 and orientation correct) | 1 / 2 |" in text
+        assert "### Success by target slot" in text
+        assert "| Slot | Successes | Episodes | Success rate |" in text
+        assert "| slot_a | 1 | 1 | 100% |" in text
+        assert "| - | 0 | 1 | 0% |" in text
+        assert "| **All** | 1 | 2 | 50% |" in text
+
+    def test_success_by_slot_reports_non_home_slots(self, session_dir, run_dir):
+        manifest = {"discarded": False, "start_reset_event": {"target_slot": "B"}}
+        _write_json(session_dir / "ep_002" / "manifest.json", manifest)
+        text = summarize_eval.write_summary(session_dir, run_dir).read_text(encoding="utf-8")
+        assert "| B (home) | 0 | 1 | 0% |" in text
+        assert "| Other than B | 1 | 1 | 100% |" in text

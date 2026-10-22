@@ -11,7 +11,17 @@ docker run -d --name openpi_server --gpus=all -p 8000:8000 \
   -v "$(pwd):/app" \
   -v "$HOME/.cache/openpi:/openpi_assets" \
   -e OPENPI_DATA_HOME=/openpi_assets -e IS_DOCKER=true \
-  -e SERVER_ARGS="policy:checkpoint --policy.config=pi05_ebim_task2_fixpos_200_finetune --policy.dir=checkpoints/pi05_ebim_task2_fixpos_200_finetune/pi05_fixpos_200/30000" \
+  -e SERVER_ARGS="policy:checkpoint --policy.config=pi05_ebim_task2_fixpos_200_finetune --policy.dir=checkpoints/pi05_ebim_task2_fixpos_200_finetune/pi05_fixpos_200/29999" \
+  openpi_server
+```
+
+```bash
+docker run -d --name openpi_server --gpus=all -p 8000:8000 \
+  -v "$(pwd):/app" \
+  -v "$(readlink -f checkpoints):/checkpoints" \
+  -v "$HOME/.cache/openpi:/openpi_assets" \
+  -e OPENPI_DATA_HOME=/openpi_assets -e IS_DOCKER=true \
+  -e SERVER_ARGS="policy:checkpoint --policy.config=pi05_lora_ebim_task2_fixpos_200_and_v5_from_fft --policy.dir=/checkpoints/pi05_lora_ebim_task2_fixpos_200_and_v5_from_fft/pi05_lora_fixpos_200_and_v5_from_fft/119999" \
   openpi_server
 ```
 
@@ -22,7 +32,7 @@ docker run -d --name openpi_server --gpus=all -p 8000:8000 ^
   -v "%CD%:/app" ^
   -v "%USERPROFILE%\.cache\openpi:/openpi_assets" ^
   -e OPENPI_DATA_HOME=/openpi_assets -e IS_DOCKER=true ^
-  -e SERVER_ARGS="policy:checkpoint --policy.config=pi05_ebim_task2_fixpos_200_finetune --policy.dir=checkpoints/pi05_ebim_task2_fixpos_200_finetune/pi05_fixpos_200/30000" ^
+  -e SERVER_ARGS="policy:checkpoint --policy.config=pi05_ebim_task2_fixpos_200_finetune --policy.dir=checkpoints/pi05_ebim_task2_fixpos_200_finetune/pi05_fixpos_200/29999" ^
   openpi_server
 ```
 
