@@ -112,6 +112,33 @@ def test_validate_episode_zero_frame_stream_warns():
     assert "'head' has 0 frames" in msgs
 
 
+def test_train_res_wiring_matches_layout():
+    assert convert.TRAIN_RES == {
+        "observation.images.head": layout.HEAD_TRAIN_RES,
+        "observation.images.wrist_left": None,
+        "observation.images.wrist_right": None,
+    }
+    assert set(convert.TRAIN_RES) == set(convert.CAMERAS)
+
+
+def _write_tasks(raw, *tasks):
+    (raw / "meta").mkdir(parents=True)
+    (raw / "meta" / "tasks.jsonl").write_text(
+        "".join(json.dumps({"task_index": i, "task": t}) + "\n" for i, t in enumerate(tasks))
+    )
+
+
+def test_load_task_returns_layout_prompt(tmp_path):
+    _write_tasks(tmp_path, layout.PROMPT)
+    assert convert.load_task(tmp_path) == layout.PROMPT
+
+
+def test_load_task_rejects_other_prompt(tmp_path):
+    _write_tasks(tmp_path, layout.PROMPT + ".")
+    with pytest.raises(ValueError, match="layout.PROMPT"):
+        convert.load_task(tmp_path)
+
+
 def test_converted_smoke_dataset():
     """Checks the smoke conversion against the raw data; skips if it is absent. Produce it with:
 
@@ -149,6 +176,6 @@ def test_converted_smoke_dataset():
     with av.open(str(head_video)) as container:
         frame = next(container.decode(video=0))
     assert frame.time == 0
-    expected = preprocess.to_policy_image(frame.to_ndarray(format="rgb24"), convert.HEAD_TRAIN_RES)
+    expected = preprocess.to_policy_image(frame.to_ndarray(format="rgb24"), layout.HEAD_TRAIN_RES)
     diff = np.abs(to_hwc(item["image"]).astype(np.int16) - expected.astype(np.int16))
     assert diff.max() <= 1

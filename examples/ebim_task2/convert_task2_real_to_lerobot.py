@@ -9,7 +9,7 @@ at ~29 fps), episode indices have gaps, and 89 of 238 episodes are marked invali
 (`annotation.human.validity != 1`). This script reads the per-episode parquet + AV1 videos directly
 (pyav), keeps the valid episodes, aligns every row to the latest frame of each camera, and turns every
 frame into a 224x224 policy image with `robot_client.preprocess.to_policy_image` -- the same function
-and arguments the real-robot client uses (head resized to `HEAD_TRAIN_RES` if its size differs, then
+and arguments the real-robot client uses (head resized to `layout.HEAD_TRAIN_RES` if its size differs, then
 letterboxed; wrists letterboxed only). It writes a train repo plus a seeded hold-out repo.
 
 Outputs (both repos are removed and recreated, so re-runs are idempotent):
@@ -142,9 +142,9 @@ CAMERAS = {
     "observation.images.wrist_right": "right_wrist_image",
 }
 HEAD_VIDEO_KEY = "observation.images.head"
-# (W, H) every head frame is resized to before letterboxing (the client's `train_res`); wrists: None.
-HEAD_TRAIN_RES = (336, 188)
-TRAIN_RES = {key: (HEAD_TRAIN_RES if key == HEAD_VIDEO_KEY else None) for key in CAMERAS}
+# Head frames are resized to layout.HEAD_TRAIN_RES (W, H) before letterboxing (the client's `train_res`);
+# wrists: None.
+TRAIN_RES = {key: (layout.HEAD_TRAIN_RES if key == HEAD_VIDEO_KEY else None) for key in CAMERAS}
 # Warn when a camera's last frame is this much older than the episode's last row (frozen tail).
 MAX_TAIL_GAP_S = 0.5
 FPS = 20
@@ -156,6 +156,11 @@ def load_task(raw_dir: pathlib.Path) -> str:
     tasks = [json.loads(line)["task"] for line in (raw_dir / "meta" / "tasks.jsonl").read_text().splitlines() if line]
     if len(tasks) != 1:
         raise ValueError(f"expected exactly one task in meta/tasks.jsonl, found {tasks}")
+    if tasks[0] != layout.PROMPT:
+        raise ValueError(
+            f"meta/tasks.jsonl prompt {tasks[0]!r} differs from layout.PROMPT {layout.PROMPT!r}; "
+            "the client and the policy server use layout.PROMPT, so training on another string would be refused at deploy time"
+        )
     return tasks[0]
 
 

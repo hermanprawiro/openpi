@@ -15,6 +15,9 @@ ACTION_DIM = 16
 CONTROL_HZ = 20
 ACTION_HORIZON = 50
 PROMPT = "Pick up the thermal pad and place it on the target RAM board"
+# (W, H) the head camera is resized to (if its live size differs) before letterboxing to 224x224.
+# Single source for the converter and the site YAML (`cameras.head.train_res`).
+HEAD_TRAIN_RES = (336, 188)
 
 ARM_SLICES = {"left": slice(0, 7), "right": slice(8, 15)}
 GRIPPER_INDEX = {"left": 7, "right": 15}

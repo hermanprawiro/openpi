@@ -1,0 +1,91 @@
+# Site profile for the Munich testbed (Humble / Fast DDS, raw sensor_msgs/Image cameras).
+# Everything the operator may need to change lives here; use `--set dotted.key=value` for one-off
+# overrides. The policy-server host/port/key are NOT set here: use POLICY_SERVER_HOST / _PORT / _API_KEY.
+ros: {rmw: rmw_fastrtps_cpp, domain_id: 0}
+
+# Must equal the prompt the checkpoint was trained with (the client refuses anything else).
+policy: {prompt: "Pick up the thermal pad and place it on the target RAM board", control_hz: 20}
+
+cameras:
+  # train_res (W, H): the dataset's head frames are 336x188; a live frame of another size is resized to it first.
+  head:        {topic: /head_camera/zed_node/rgb/color/rect/image, type: raw, train_res: [336, 188]}
+  wrist_left:  {topic: /wrist_camera_left/camera/color/image_rect_raw, type: raw}
+  wrist_right: {topic: /wrist_camera_right/camera/color/image_rect_raw, type: raw}
+
+# State dims replaced by a constant before inference. The left gripper state is exactly 0.0 in every
+# training episode (dim 7 = left knuckle), so it is pinned and the left gripper stream is not required.
+state:
+  pin: {7: 0.0}
+
+arms:
+  left:
+    measured_topic: /left/franka_robot_state_broadcaster/measured_joint_states
+    command_topic: /left/gello/joint_states
+    joint_names: [left_fr3v2_joint1, left_fr3v2_joint2, left_fr3v2_joint3, left_fr3v2_joint4,
+                  left_fr3v2_joint5, left_fr3v2_joint6, left_fr3v2_joint7]
+    controller_manager: /left/controller_manager
+    controller: joint_impedance_controller
+    gripper:
+      state_topic: /left/gripper/joint_states
+      joint: robotiq_85_left_knuckle_joint
+      command_topic: /left/gripper/gripper_client/target_gripper_width_percent
+      required: false
+    ptp_action: /left/action_server/ptp_motion
+    # Medoid start pose of the training episodes (start_pose_stats.json): the real start of episode 94.
+    start_pose: [1.511, 0.624, -1.891, -1.902, 1.311, 1.244, -1.176]
+  right:
+    measured_topic: /right/franka_robot_state_broadcaster/measured_joint_states
+    command_topic: /right/gello/joint_states
+    joint_names: [right_fr3v2_joint1, right_fr3v2_joint2, right_fr3v2_joint3, right_fr3v2_joint4,
+                  right_fr3v2_joint5, right_fr3v2_joint6, right_fr3v2_joint7]
+    controller_manager: /right/controller_manager
+    controller: joint_impedance_controller
+    gripper:
+      state_topic: /right/gripper/joint_states
+      joint: robotiq_85_left_knuckle_joint
+      command_topic: /right/gripper/gripper_client/target_gripper_width_percent
+    ptp_action: /right/action_server/ptp_motion
+    # Medoid start pose of the training episodes (start_pose_stats.json): the real start of episode 200.
+    start_pose: [1.402, -0.613, -1.185, -1.807, -1.428, 1.150, 0.541]
+
+active_arms: [left, right]
+
+# absolute: command topic carries target joint positions. relative_to_activation: targets relative to
+# the pose at activation. joint_signs flips joint directions on the command side. Verify both on site
+# with `check-motion`.
+command_mode: absolute
+joint_signs:
+  left:  [1, 1, 1, 1, 1, 1, 1]
+  right: [1, 1, 1, 1, 1, 1, 1]
+
+# The dataset's constant spine value 434 is read as millimetres; the Munich profile of the reference
+# submission uses metres (e.g. 0.4). Confirm the unit and the working height on site.
+spine: {action: /franka_spine_node/move_absolute, height: 0.434}
+
+# sync: blocking inference every execute_horizon steps. async: background inference merged into the queue.
+inference:
+  mode: sync
+  execute_horizon: 30
+  async: {trigger_threshold: 0.5, merge: blend_favor_old, blend_steps: 10}
+
+safety:
+  max_step_rad: 0.10
+  max_track_lag_rad: 0.5
+  obs_stale_hold_s: 1.0
+  obs_stale_freeze_s: 5.0
+  measured_dead_s: 1.5
+  infer_dry_freeze_s: 5.0
+  max_start_offset_rad: 0.3
+  episode_timeout_s: 120
+  q_margin_rad: 0.05
+  gripper_deadband: 0.02
+
+smoother: {impl: ruckig, velocity_scale: 0.5}
+
+# takeover.mode: external -> the organizers activate/deactivate the controller with their own tooling;
+# we stream hold, wait for it to become active and never call switch_controller.
+takeover: {mode: switch}
+
+server: {connect_timeout_s: 10.0, infer_timeout_s: 10.0}
+
+out_dir: /out
