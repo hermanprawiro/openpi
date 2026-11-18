@@ -9,9 +9,9 @@
 # volume (or override keys with `--set key=value`). Run directories land in ${OUT_DIR:-./robot_runs}
 # (next to this file).
 #
-# If the robot hosts use a UDP-only Fast DDS profile (the Munich hosts do), set
-#   FASTRTPS_DEFAULT_PROFILES_FILE=/app/robot_client/fastdds_udp_only.xml
-# Unset (the default), Fast DDS uses its built-in transports.
+# Fast DDS uses the shipped UDP-only profile (/app/robot_client/fastdds_udp_only.xml) by default, like the
+# Munich hosts. Set FASTRTPS_DEFAULT_PROFILES_FILE to another path in the container to replace it, or to
+# the empty string (FASTRTPS_DEFAULT_PROFILES_FILE= docker compose ...) for Fast DDS's built-in transports.
 #
 # Tests (two invocations: the suites share test module and conftest basenames):
 #   docker compose -f examples/ebim_task2/compose.robot_client.yml run --rm robot-client pytest /app/robot_client/tests
@@ -19,8 +19,7 @@
 #
 # Dev setup without a robot (profile `dev`; separate containers, so they use the UDP-only profile):
 #   docker compose -f examples/ebim_task2/compose.robot_client.yml --profile dev up -d fake-robot stub-server
-#   FASTRTPS_DEFAULT_PROFILES_FILE=/app/robot_client/fastdds_udp_only.xml \
-#       docker compose -f examples/ebim_task2/compose.robot_client.yml run --rm robot-client check-obs
+#   docker compose -f examples/ebim_task2/compose.robot_client.yml run --rm robot-client check-obs
 #   docker compose -f examples/ebim_task2/compose.robot_client.yml --profile dev down
 
 x-robot-client-image: &robot-client-image
@@ -40,7 +39,7 @@ services:
       - POLICY_SERVER_PORT=${POLICY_SERVER_PORT:-}
       - POLICY_SERVER_API_KEY=${POLICY_SERVER_API_KEY:-}
       - ROBOT_SITE=/config/robot_site.yaml
-      - FASTRTPS_DEFAULT_PROFILES_FILE=${FASTRTPS_DEFAULT_PROFILES_FILE:-}
+      - FASTRTPS_DEFAULT_PROFILES_FILE=${FASTRTPS_DEFAULT_PROFILES_FILE-/app/robot_client/fastdds_udp_only.xml}
     volumes:
       - ./robot_client/robot_site.munich.yaml:/config/robot_site.yaml:ro
       - ${OUT_DIR:-./robot_runs}:/out
