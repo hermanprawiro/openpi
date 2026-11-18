@@ -1,0 +1,35 @@
+# Serve one trained Munich checkpoint. Swapping checkpoints = change POLICY_CONFIG and CKPT_DIR only.
+#
+#   POLICY_CONFIG=pi05_ebim_task2_munich_real \
+#   CKPT_DIR=/abs/path/checkpoints/pi05_ebim_task2_munich_real/munich_v1/30000 \
+#   docker compose -f examples/ebim_task2/compose.policy_server.yml up --build
+#
+# Prefer examples/ebim_task2/serve_munich.sh, which checks the checkpoint layout first.
+# The image has no source: the repo is bind-mounted at /app and the CMD runs
+# `uv run scripts/serve_policy.py $SERVER_ARGS` (same image as scripts/docker/compose.yml).
+services:
+  openpi_server:
+    image: openpi_server
+    build:
+      context: ../..
+      dockerfile: scripts/docker/serve_policy.Dockerfile
+    init: true
+    tty: true
+    network_mode: host
+    volumes:
+      # Compose resolves relative paths against this file's directory: ../.. is the repo root.
+      - ../..:/app
+      - ${CKPT_DIR:?set CKPT_DIR to the checkpoint step dir (contains params/ and assets/)}:/ckpt:ro
+      # Download cache (PaliGemma tokenizer lands in big_vision/paligemma_tokenizer.model).
+      - ${OPENPI_DATA_HOME:-${HOME}/.cache/openpi}:/openpi_assets
+    environment:
+      - OPENPI_DATA_HOME=/openpi_assets
+      - IS_DOCKER=true
+      - SERVER_ARGS=--port ${PORT:-8000} policy:checkpoint --policy.config=${POLICY_CONFIG:?set POLICY_CONFIG to the training config name} --policy.dir=/ckpt
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
