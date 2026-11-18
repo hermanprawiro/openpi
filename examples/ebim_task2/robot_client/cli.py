@@ -78,6 +78,7 @@ DEFAULT_SITE = "/config/robot_site.yaml"
 RUN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 RELEASING_MESSAGE = "releasing — wait, or use the E-stop"
 GATE_POLL_S = 0.05  # start gate: key / stream health polling period
+FIRST_HOLD_WAIT_S = 1.0  # dry run: how long to wait for the streamer's first hold command
 LIVE_OBS_WAIT_S = 3.0  # check-infer: how long to wait for a complete live snapshot
 
 RESET_PROMPT = "Reset the scene. Workspace clear? [Enter] move to start pose / [k] keep current pose / [q] quit: "
@@ -815,6 +816,7 @@ class _RunCommand:
             raise Refused(f"refusing to stream hold = measured: {e}") from e
         self._ep = None
         try:
+            self._wait_first_hold(streamer)
             result = self._gate_and_run(idx, streamer)
         except KeyboardInterrupt:
             self._abandon_episode(streamer)
@@ -822,6 +824,15 @@ class _RunCommand:
         finally:
             streamer.stop()
         return self._conclude(idx, result, streamer)
+
+    def _wait_first_hold(self, streamer: Streamer) -> None:
+        """Until every side has published its first hold command: the start gate reads "not published yet" as a
+        stopped stream. Bounded; a stream that never starts is then reported by the gate."""
+        deadline = time.monotonic() + FIRST_HOLD_WAIT_S
+        while streamer.fault is None and time.monotonic() < deadline:
+            if all(streamer.cycles_since_start(side) > 0 for side in self.sides):
+                return
+            time.sleep(0.005)
 
     def _measured_hold(self) -> dict:
         deadline = time.monotonic() + self.cfg.takeover.discovery_wait_s

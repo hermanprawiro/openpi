@@ -481,6 +481,24 @@ def test_episodes_get_distinct_generations(tmp_path, monkeypatch, stub_server):
     assert [json.loads((d / "result.json").read_text())["outcome"] for d in episode_dirs(tmp_path)] == ["f", "x"]
 
 
+def test_dry_run_start_gate_waits_for_the_first_hold_command(tmp_path, monkeypatch, stub_server):
+    """The dry-run streamer starts right before the start gate; a first tick that has not happened yet is not a
+    stopped stream (it used to end the episode 'FREEZE before the start' whenever the thread was slow to tick)."""
+    server = stub_server(layout_id="munich16", latency_s=0.01)
+    World(monkeypatch, ScriptedConsole(lines=["f"], keys=[ENTER]))
+    _Runner.generations = []
+    monkeypatch.setattr(cli, "Runner", _Runner)
+    run = cli.Streamer._run  # noqa: SLF001
+
+    def late_first_tick(self):
+        time.sleep(0.03)  # the first hold command comes 30 ms after start()
+        run(self)
+
+    monkeypatch.setattr(cli.Streamer, "_run", late_first_tick)
+    assert cli.main(["run", *base_args(tmp_path), "--dry-run", "--episodes", "1"], env=server_env(server.port)) == 0
+    assert _Runner.generations == [1]
+
+
 def test_second_sigint_does_not_abort_release(tmp_path, monkeypatch, capfd, stub_server):
     server = stub_server(layout_id="munich16", latency_s=0.01)
 
