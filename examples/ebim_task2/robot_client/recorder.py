@@ -12,7 +12,9 @@ Layout of one run:
             images/<camera>/step_NNNNNN.jpg   policy inputs at 2 Hz
             result.json, stream_stats.json    written by `finish`
 
-Everything is flushed as it is written so a crash mid-episode still leaves usable files.
+Everything is flushed as it is written so a crash mid-episode still leaves usable files. The recorder is
+diagnostics only: `event`, `step`, `chunk` and `images` never raise into the control loop. The first error of a
+sink is logged and that sink is disabled; `finish` still attempts every final write and records what failed.
 """
 
 import json
@@ -59,12 +61,14 @@ def _redact(obj):
     return obj
 
 
-def _write_atomic(path: Path, write) -> None:
+def _write_atomic(path: Path, write, *, sync: bool = True) -> None:
+    """Write via a temp file + os.replace (survives a process crash); fsync too unless `sync` is False."""
     tmp = path.with_name(path.name + ".tmp")
     with open(tmp, "wb") as f:
         write(f)
-        f.flush()
-        os.fsync(f.fileno())
+        if sync:
+            f.flush()
+            os.fsync(f.fileno())
     os.replace(tmp, path)
 
 
@@ -82,13 +86,19 @@ class RunRecorder:
         )
         _write_json(self.dir / "server_metadata.json", server_metadata or {})
         self._lock = threading.Lock()
+        self._events_ok = True
         self._events = open(self.dir / "events.log", "a", buffering=1)  # noqa: SIM115
 
     def event(self, kind: str, **fields) -> None:
-        record = {"wall": time.time(), "mono": time.monotonic(), "kind": kind, **fields}
-        line = _dumps(record)
         with self._lock:
-            self._events.write(line + "\n")
+            if not self._events_ok:
+                return
+            try:
+                record = {"wall": time.time(), "mono": time.monotonic(), "kind": kind, **fields}
+                self._events.write(_dumps(record) + "\n")
+            except Exception:
+                self._events_ok = False
+                logger.exception("recorder: events.log write failed; event logging disabled")
 
     def episode(self, idx: int) -> "EpisodeRecorder":
         return EpisodeRecorder(self.dir / f"episode_{idx:03d}", control_hz=layout.CONTROL_HZ)
@@ -105,66 +115,118 @@ class EpisodeRecorder:
         self.image_every = max(1, control_hz // 2)
         self._lock = threading.Lock()
         self._finished = False
-        self._steps = open(self.dir / "steps.jsonl", "a", buffering=1)  # noqa: SIM115
+        self._disabled: set[str] = set()  # sinks ("steps", "chunks", "images") turned off after an error
+        self._errors: list[str] = []
+        self._steps = None
+        try:
+            self._steps = open(self.dir / "steps.jsonl", "a", buffering=1)  # noqa: SIM115
+        except Exception as e:
+            self._fail("steps", e)
         self._obs_step: list[int] = []
         self._t_request: list[float] = []
         self._t_receive: list[float] = []
         self._latency_steps: list[int] = []
         self._chunks: list[np.ndarray] = []
 
+    def _fail(self, sink: str, exc: Exception) -> None:
+        if sink not in self._disabled:
+            self._disabled.add(sink)
+            logger.error("recorder: %s write failed (%r); %s recording disabled", sink, exc, sink)
+        self._errors.append(f"{sink}: {exc!r}")
+
     def step(self, record: dict) -> None:
-        line = _dumps(record)
         with self._lock:
-            if not self._finished:
-                self._steps.write(line + "\n")
+            if self._finished or "steps" in self._disabled or self._steps is None:
+                return
+            try:
+                self._steps.write(_dumps(record) + "\n")
+            except Exception as e:
+                self._fail("steps", e)
 
     def chunk(self, obs_step: int, t_request: float, t_receive: float, latency_steps: int, chunk: np.ndarray) -> None:
         with self._lock:
             if self._finished:
                 return
-            self._obs_step.append(int(obs_step))
-            self._t_request.append(float(t_request))
-            self._t_receive.append(float(t_receive))
-            self._latency_steps.append(int(latency_steps))
-            self._chunks.append(np.asarray(chunk, dtype=np.float32).copy())
-            self._save_chunks()
+            try:
+                arr = np.array(chunk, dtype=np.float32)
+                if arr.ndim != 2 or (self._chunks and arr.shape != self._chunks[0].shape):
+                    expected = self._chunks[0].shape if self._chunks else "(horizon, dim)"
+                    logger.error("recorder: rejecting chunk of shape %s (expected %s)", arr.shape, expected)
+                    self._errors.append(f"chunks: rejected shape {arr.shape} at obs_step {obs_step}")
+                    return
+                row = (int(obs_step), float(t_request), float(t_receive), int(latency_steps))
+            except Exception as e:
+                self._fail("chunks", e)
+                return
+            self._obs_step.append(row[0])
+            self._t_request.append(row[1])
+            self._t_receive.append(row[2])
+            self._latency_steps.append(row[3])
+            self._chunks.append(arr)
+            if "chunks" in self._disabled:
+                return
+            try:
+                # No fsync here: os.replace already survives a process crash and the control loop must not
+                # wait on disk. `finish` does the fsync'd final write.
+                self._save_chunks(sync=False)
+            except Exception as e:
+                self._fail("chunks", e)
 
     def images(self, step: int, images: dict[str, np.ndarray]) -> None:
         if step % self.image_every != 0:
             return
         with self._lock:
-            if self._finished:
+            if self._finished or "images" in self._disabled:
                 return
-        for camera, arr in images.items():
-            cam_dir = self.dir / "images" / camera
-            cam_dir.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(np.asarray(arr, dtype=np.uint8)).save(
-                cam_dir / f"step_{step:06d}.jpg", quality=JPEG_QUALITY
-            )
+            try:
+                for camera, arr in images.items():
+                    cam_dir = self.dir / "images" / camera
+                    cam_dir.mkdir(parents=True, exist_ok=True)
+                    frame = Image.fromarray(np.asarray(arr, dtype=np.uint8))
+                    frame.save(cam_dir / f"step_{step:06d}.jpg", quality=JPEG_QUALITY)
+            except Exception as e:
+                self._fail("images", e)
 
     def finish(self, outcome: Outcome, note: str, stats: dict, stream_stats: dict) -> None:
+        """Write result.json and stream_stats.json; every write is attempted even if another fails."""
         if outcome not in OUTCOMES:
             raise ValueError(f"outcome must be one of {OUTCOMES}, got {outcome!r}")
         with self._lock:
             if self._finished:
                 return
-            self._finished = True
-            self._steps.close()
-            self._save_chunks()
-            _write_json(self.dir / "stream_stats.json", stream_stats)
-            _write_json(
-                self.dir / "result.json",
-                {
+            try:
+                if self._steps is not None:
+                    try:
+                        self._steps.close()
+                    except Exception as e:
+                        self._errors.append(f"steps: close {e!r}")
+                try:
+                    self._save_chunks(sync=True)
+                except Exception as e:
+                    self._errors.append(f"chunks: final save {e!r}")
+                    logger.exception("recorder: final chunks.npz write failed")
+                try:
+                    _write_json(self.dir / "stream_stats.json", stream_stats)
+                except Exception as e:
+                    self._errors.append(f"stream_stats: {e!r}")
+                    logger.exception("recorder: stream_stats.json write failed")
+                result = {
                     "outcome": outcome,
                     "note": note,
                     "stats": stats,
                     "n_chunks": len(self._chunks),
                     "finished_wall": time.time(),
-                },
-            )
+                    "recorder_errors": self._errors,
+                }
+                try:
+                    _write_json(self.dir / "result.json", result)
+                except Exception:
+                    logger.exception("recorder: result.json write failed")
+            finally:
+                self._finished = True
 
-    def _save_chunks(self) -> None:
-        """Rewrite chunks.npz atomically (caller holds the lock); small enough to do after every chunk."""
+    def _save_chunks(self, *, sync: bool) -> None:
+        """Rewrite chunks.npz atomically (caller holds the lock)."""
         chunks = np.stack(self._chunks) if self._chunks else np.zeros((0, 0, 0), dtype=np.float32)
         arrays = {
             "obs_step": np.asarray(self._obs_step, dtype=np.int64),
@@ -173,4 +235,4 @@ class EpisodeRecorder:
             "latency_steps": np.asarray(self._latency_steps, dtype=np.int64),
             "chunks": chunks,
         }
-        _write_atomic(self.dir / "chunks.npz", lambda f: np.savez(f, **arrays))
+        _write_atomic(self.dir / "chunks.npz", lambda f: np.savez(f, **arrays), sync=sync)

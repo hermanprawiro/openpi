@@ -2,6 +2,7 @@ import json
 
 import numpy as np
 import pytest
+from robot_client import recorder
 from robot_client.recorder import RunRecorder
 import yaml
 
@@ -85,3 +86,76 @@ def test_bad_outcome_rejected(tmp_path):
     ep = RunRecorder(tmp_path, "run1", _config(), None).episode(0)
     with pytest.raises(ValueError, match="outcome"):
         ep.finish("bogus", "", {}, {})
+
+
+def test_wrong_shape_chunk_rejected_without_poisoning(tmp_path):
+    ep = RunRecorder(tmp_path, "run1", _config(), None).episode(0)
+    ep.chunk(0, 1.0, 1.1, 2, np.zeros((50, 16)))
+    ep.chunk(30, 2.0, 2.1, 2, np.zeros((50, 15)))  # wrong dim
+    ep.chunk(40, 2.0, 2.1, 2, np.zeros(16))  # wrong ndim
+    ep.chunk(60, 3.0, 3.1, 2, np.ones((50, 16)))
+    ep.finish("s", "", {}, {})
+    ep_dir = tmp_path / "run1" / "episode_000"
+    npz = np.load(ep_dir / "chunks.npz")
+    assert npz["chunks"].shape == (2, 50, 16)
+    assert npz["obs_step"].tolist() == [0, 60]
+    result = json.loads((ep_dir / "result.json").read_text())
+    assert result["n_chunks"] == 2
+    assert len(result["recorder_errors"]) == 2
+
+
+def test_io_errors_never_raise_and_finish_still_writes_result(tmp_path, monkeypatch):
+    run = RunRecorder(tmp_path, "run1", _config(), None)
+    ep = run.episode(0)
+    ep.step({"step": 0})
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("robot_client.recorder.Image.Image.save", boom)
+    monkeypatch.setattr("robot_client.recorder._write_atomic", boom)
+
+    class BadFile:
+        def write(self, _):
+            raise OSError("disk full")
+
+        def close(self):
+            pass
+
+    ep._steps = BadFile()  # noqa: SLF001
+    run._events = BadFile()  # noqa: SLF001
+    run.event("x")
+    run.event("y")  # disabled after the first failure, still silent
+    ep.step({"step": 1})
+    ep.step({"step": 2})
+    ep.chunk(0, 1.0, 1.1, 2, np.zeros((50, 16)))
+    ep.images(0, {"head": _img()})
+    ep.images(10, {"head": _img()})
+
+    monkeypatch.undo()
+    ep.finish("x", "disk trouble", {"k": 1}, {"s": 1})
+    ep_dir = tmp_path / "run1" / "episode_000"
+    result = json.loads((ep_dir / "result.json").read_text())
+    assert result["outcome"] == "x"
+    assert any(e.startswith("steps") for e in result["recorder_errors"])
+    assert any(e.startswith("chunks") for e in result["recorder_errors"])
+    assert any(e.startswith("images") for e in result["recorder_errors"])
+    assert json.loads((ep_dir / "stream_stats.json").read_text()) == {"s": 1}
+    assert np.load(ep_dir / "chunks.npz")["chunks"].shape == (1, 50, 16)
+
+
+def test_finish_attempts_result_when_other_writes_fail(tmp_path, monkeypatch):
+    ep = RunRecorder(tmp_path, "run1", _config(), None).episode(0)
+    real = recorder._write_atomic  # noqa: SLF001
+
+    def selective(path, write, **kw):
+        if path.name != "result.json":
+            raise OSError("nope")
+        real(path, write, **kw)
+
+    monkeypatch.setattr(recorder, "_write_atomic", selective)
+    ep.finish("f", "n", {}, {})
+    ep.finish("s", "again", {}, {})  # idempotent even after a partly failed finish
+    result = json.loads((tmp_path / "run1" / "episode_000" / "result.json").read_text())
+    assert result["outcome"] == "f"
+    assert len(result["recorder_errors"]) == 2
