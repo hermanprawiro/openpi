@@ -1,0 +1,65 @@
+# Real-robot client (ROS 2 Humble, Fast DDS, host network). Run from the openpi repo root:
+#   docker compose -f examples/ebim_task2/compose.robot_client.yml build
+#   POLICY_SERVER_HOST=<gpu host> docker compose -f examples/ebim_task2/compose.robot_client.yml \
+#       run --rm robot-client check-obs
+# Any robot_client subcommand works the same way (check-infer, check-motion --arm right, prepare,
+# run --dry-run, run, release); `bash`, `pytest ...` and `ros2 ...` run as given.
+#
+# The site YAML is mounted at /config/robot_site.yaml; to use another one, change the left side of that
+# volume (or override keys with `--set key=value`). Run directories land in ${OUT_DIR:-./robot_runs}
+# (next to this file).
+#
+# If the robot hosts use a UDP-only Fast DDS profile (the Munich hosts do), set
+#   FASTRTPS_DEFAULT_PROFILES_FILE=/app/robot_client/fastdds_udp_only.xml
+# Unset (the default), Fast DDS uses its built-in transports.
+#
+# Tests (two invocations: the suites share test module and conftest basenames):
+#   docker compose -f examples/ebim_task2/compose.robot_client.yml run --rm robot-client pytest /app/robot_client/tests
+#   docker compose -f examples/ebim_task2/compose.robot_client.yml run --rm robot-client pytest /app/eval_client/tests
+#
+# Dev setup without a robot (profile `dev`; separate containers, so they use the UDP-only profile):
+#   docker compose -f examples/ebim_task2/compose.robot_client.yml --profile dev up -d fake-robot stub-server
+#   FASTRTPS_DEFAULT_PROFILES_FILE=/app/robot_client/fastdds_udp_only.xml \
+#       docker compose -f examples/ebim_task2/compose.robot_client.yml run --rm robot-client check-obs
+#   docker compose -f examples/ebim_task2/compose.robot_client.yml --profile dev down
+
+x-robot-client-image: &robot-client-image
+  build:
+    context: ../..
+    dockerfile: examples/ebim_task2/Dockerfile.robot_client
+  image: ebim-task2-robot-client
+
+services:
+  robot-client:
+    <<: *robot-client-image
+    network_mode: host
+    stdin_open: true
+    tty: true
+    environment:
+      - POLICY_SERVER_HOST=${POLICY_SERVER_HOST:-}
+      - POLICY_SERVER_PORT=${POLICY_SERVER_PORT:-}
+      - POLICY_SERVER_API_KEY=${POLICY_SERVER_API_KEY:-}
+      - ROBOT_SITE=/config/robot_site.yaml
+      - FASTRTPS_DEFAULT_PROFILES_FILE=${FASTRTPS_DEFAULT_PROFILES_FILE:-}
+    volumes:
+      - ./robot_client/robot_site.munich.yaml:/config/robot_site.yaml:ro
+      - ${OUT_DIR:-./robot_runs}:/out
+
+  fake-robot:
+    <<: *robot-client-image
+    profiles: [dev]
+    network_mode: host
+    environment:
+      - FASTRTPS_DEFAULT_PROFILES_FILE=/app/robot_client/fastdds_udp_only.xml
+    volumes:
+      - ./robot_client/robot_site.munich.yaml:/config/robot_site.yaml:ro
+      - ${OUT_DIR:-./robot_runs}:/out
+    command: python3 -m robot_client.fake_robot --site /config/robot_site.yaml --events /out/fake_robot_events.jsonl
+
+  stub-server:
+    <<: *robot-client-image
+    profiles: [dev]
+    network_mode: host
+    environment:
+      - FASTRTPS_DEFAULT_PROFILES_FILE=/app/robot_client/fastdds_udp_only.xml
+    command: python3 -m robot_client.stub_server --port ${POLICY_SERVER_PORT:-8000}

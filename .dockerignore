@@ -1,3 +1,11 @@
 .venv
 checkpoints
 data
+.git
+.cache
+.ruff_cache
+wandb
+**/__pycache__
+examples/ebim_task2/eval_results
+examples/ebim_task2/local_sweep
+examples/ebim_task2/robot_runs

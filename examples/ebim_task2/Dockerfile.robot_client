@@ -1,0 +1,74 @@
+# Real-robot client for the EBiM task2 Munich testbed (ROS 2 Humble + Fast DDS, like the robot PC).
+# Build from the openpi repo root (it copies packages/openpi-client and both client packages):
+#   docker compose -f examples/ebim_task2/compose.robot_client.yml build
+# or
+#   docker build -f examples/ebim_task2/Dockerfile.robot_client -t ebim-task2-robot-client .
+#
+# Humble + rmw_fastrtps_cpp on purpose: a Jazzy/Cyclone container broke the Humble robot PC.
+# The base tag is not pinned and packages are upgraded: rclpy's ActionClient lock needs rclpy >= 3.3.x,
+# newer than some ros:humble-ros-base snapshots.
+
+FROM ros:humble-ros-base AS base
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------------------------------
+# franka_msgs (PTPMotion) and franka_spine_msgs (MoveAbsolute, GetPosition), built from source.
+FROM base AS msgs
+# b4164f5 ("Merge branch 'release-3-4-1' into 'jazzy'"); its message packages build on Humble.
+ARG FRANKA_ROS2_COMMIT=b4164f555500fe50c3f44f24d4cccc452ffac442
+RUN git init -q /opt/franka_ws/src/franka_ros2 \
+    && cd /opt/franka_ws/src/franka_ros2 \
+    && git remote add origin https://github.com/frankarobotics/franka_ros2.git \
+    && git fetch -q --depth 1 origin "${FRANKA_ROS2_COMMIT}" \
+    && git checkout -q FETCH_HEAD
+# Built at its final path so the generated setup files need no relocation.
+RUN bash -c "source /opt/ros/humble/setup.bash \
+    && cd /opt/franka_ws \
+    && colcon build --packages-select franka_msgs franka_spine_msgs \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF"
+
+# ---------------------------------------------------------------------------------------------------
+FROM base
+# python3-opencv from apt (no cv_bridge: the client decodes sensor_msgs/Image itself).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-humble-rmw-fastrtps-cpp \
+        ros-humble-controller-manager-msgs \
+        python3-opencv \
+        python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=msgs /opt/franka_ws/install /opt/franka_ws/install
+
+# numpy<2 is openpi-client's own pin (and keeps the apt cv2 importable); pytest matches uv.lock (the
+# apt pytest 6.2.5 in the base has no `pytest` command).
+COPY packages/openpi-client /tmp/openpi-client
+RUN pip3 install --no-cache-dir \
+        "numpy<2" \
+        pillow \
+        pyyaml \
+        websockets \
+        msgpack \
+        ruckig==0.19.4 \
+        pytest==8.3.5 \
+        /tmp/openpi-client \
+    && rm -rf /tmp/openpi-client
+
+# robot_client imports eval_client (inference, chunking); both are importable from /app.
+COPY examples/ebim_task2/eval_client /app/eval_client
+COPY examples/ebim_task2/robot_client /app/robot_client
+# Only for `pytest /app/eval_client/tests` (it expects them next to eval_client, as in examples/ebim_task2).
+COPY examples/ebim_task2/summarize_eval.py examples/ebim_task2/eval_config.yaml /app/
+RUN chmod -R a+rX /app && chmod a+rx /app/robot_client/entrypoint.sh
+
+ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
+    ROS_DOMAIN_ID=0 \
+    PYTHONPATH=/app \
+    PYTHONUNBUFFERED=1 \
+    PYTEST_ADDOPTS="-p no:launch_testing -p no:launch_ros -p no:cacheprovider"
+# PYTEST_ADDOPTS: the launch_testing/launch_ros pytest plugins from /opt/ros import test modules
+# themselves, so one module-level importorskip skips the whole session; the cache provider would
+# write into /app.
+
+WORKDIR /app
+ENTRYPOINT ["/app/robot_client/entrypoint.sh"]
