@@ -1,11 +1,15 @@
+import base64
+import hashlib
 from pathlib import Path
 import socket
+import struct
 import threading
 import time
 
 from eval_client.inference import InferenceWorker
 from eval_client.inference import PolicyClient
 import numpy as np
+from openpi_client import msgpack_numpy
 import pytest
 from robot_client import config as config_mod
 from robot_client import layout
@@ -111,6 +115,83 @@ def test_api_key_is_sent_as_an_authorization_header(free_port):
         connection(free_port, api_key="s3cret")  # the fake server never completes the handshake
     thread.join(3)
     assert "authorization: api-key s3cret" in seen["request"].lower()
+
+
+class SilentPeer:
+    """A raw-socket websocket peer that completes the upgrade, optionally sends the metadata frame, then
+    goes silent: it never answers pings, requests or the client's close frame (a frozen server)."""
+
+    def __init__(self, port, send_metadata):
+        self._send_metadata = send_metadata
+        self._listener = socket.socket()
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("127.0.0.1", port))
+        self._listener.listen(8)
+        self._conns = []
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self._listener.accept()
+            except OSError:
+                return
+            self._conns.append(conn)
+            request = b""
+            while b"\r\n\r\n" not in request:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                request += chunk
+            key = next(
+                line.split(b":", 1)[1].strip()
+                for line in request.split(b"\r\n")
+                if line.lower().startswith(b"sec-websocket-key")
+            )
+            accept = base64.b64encode(hashlib.sha1(key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest())
+            conn.sendall(
+                b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                b"Sec-WebSocket-Accept: " + accept + b"\r\n\r\n"
+            )
+            if self._send_metadata:
+                payload = msgpack_numpy.packb(layout.POLICY_METADATA | {"config": "silent"})
+                assert 126 <= len(payload) < 65536
+                conn.sendall(b"\x82\x7e" + struct.pack(">H", len(payload)) + payload)
+
+    def close(self):
+        self._listener.close()
+        for conn in self._conns:
+            conn.close()
+
+
+@pytest.fixture
+def silent_peer(free_port):
+    peers = []
+
+    def _make(send_metadata):
+        peers.append(SilentPeer(free_port, send_metadata))
+        return free_port
+
+    yield _make
+    for peer in peers:
+        peer.close()
+
+
+def test_frozen_server_does_not_add_the_close_handshake_to_the_infer_timeout(silent_peer):
+    conn = connection(silent_peer(send_metadata=True))
+    assert conn.get_server_metadata()["config"] == "silent"
+    start = time.monotonic()
+    with pytest.raises(TimeoutError):
+        conn.infer(make_obs())
+    assert time.monotonic() - start < TIMEOUT_S + 1.0
+
+
+def test_server_that_upgrades_but_never_sends_metadata_is_unreachable_in_time(silent_peer):
+    port = silent_peer(send_metadata=False)
+    start = time.monotonic()
+    with pytest.raises(PolicyUnreachableError, match="cannot reach policy server"):
+        connection(port)
+    assert time.monotonic() - start < TIMEOUT_S + 1.0
 
 
 def test_unreachable_message_never_contains_the_api_key(free_port):

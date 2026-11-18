@@ -24,6 +24,10 @@ from robot_client.layout import LayoutMismatchError
 
 logger = logging.getLogger(__name__)
 
+# websockets waits up to close_timeout (default 10 s) for the peer's close frame; a frozen server never
+# answers, which would add that wait to every "bounded" failure.
+CLOSE_TIMEOUT_S = 0.5
+
 
 class PolicyUnreachableError(ConnectionError):
     """The policy server could not be connected to (or did not introduce itself) in time."""
@@ -89,6 +93,7 @@ class RobotPolicyConnection:
             ws = websockets.sync.client.connect(
                 self._uri,
                 open_timeout=self._connect_timeout_s,
+                close_timeout=CLOSE_TIMEOUT_S,
                 additional_headers=self._headers,
                 compression=None,
                 max_size=None,
