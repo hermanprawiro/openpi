@@ -9,9 +9,10 @@ by us); anything else -> refuse. `takeover.mode: external` never calls switch_co
 controller with their own tooling while we stream hold.
 
 Release (`release`): hold the arm, wait, deactivate only what we activated. It never raises; errors are collected.
-`Session` ties it together: start the stream with hold = measured, take over every side, and on exit (or any
-exception, including KeyboardInterrupt, also during `__enter__`) release every side it took over, then stop the
-stream exactly once and re-raise the original exception.
+`Session` ties it together: wait for discovery and check every command topic for foreign messages before
+publishing anything, start the stream with hold = measured, take over every side, and on exit (or any exception,
+including KeyboardInterrupt, also during `__enter__`) release every side it took over, then stop the stream exactly
+once and re-raise the original exception.
 
 Pure logic against protocols; the ROS implementations come with the node (Task 16).
 """
@@ -146,6 +147,23 @@ def _check_tol(
     return measured, cmd
 
 
+def _wait_discovery(graph: GraphView, tk: TakeoverConfig, sleep: Callable[[float], None]) -> None:
+    """Sleep until the node has been up for the DDS discovery time and the foreign-message window."""
+    wait = max(tk.discovery_wait_s, FOREIGN_WINDOW_S) - graph.uptime_s()
+    if wait > 0:
+        sleep(wait)
+
+
+def _check_no_foreign_messages(side: str, arm: ArmConfig, graph: GraphView) -> None:
+    topic = arm.command_topic
+    foreign = graph.foreign_messages(topic, FOREIGN_WINDOW_S)
+    if foreign:
+        raise TakeoverError(
+            f"{side}: {foreign} message(s) from another publisher on {topic} in the last {FOREIGN_WINDOW_S:.0f} s: "
+            "is GELLO teleop still running? Stop it and retry."
+        )
+
+
 def _wait_warm(side: str, streamer: CommandStream, tk: TakeoverConfig, sleep: Callable[[float], None]) -> None:
     timeout = 1.0 + 2.0 * tk.warm_cycles / streamer.hz
     waited = 0.0
@@ -183,16 +201,9 @@ def takeover(
     # 1. measured stream present
     _measured(side, arm, graph)
     # 2. DDS discovery (and the foreign-message window) covered since the node started
-    wait = max(tk.discovery_wait_s, FOREIGN_WINDOW_S) - graph.uptime_s()
-    if wait > 0:
-        sleep(wait)
-    # 3. nobody else is commanding this arm
-    foreign = graph.foreign_messages(topic, FOREIGN_WINDOW_S)
-    if foreign:
-        raise TakeoverError(
-            f"{side}: {foreign} message(s) from another publisher on {topic} in the last {FOREIGN_WINDOW_S:.0f} s: "
-            "is GELLO teleop still running? Stop it and retry."
-        )
+    _wait_discovery(graph, tk, sleep)
+    # 3. nobody else is commanding this arm (`Session` also checks this before it starts streaming at all)
+    _check_no_foreign_messages(side, arm, graph)
     idle = graph.count_publishers(topic) - 1  # minus our own command publisher
     if idle > 0:
         logger.warning(
@@ -390,7 +401,8 @@ def session_sides(cfg: SiteConfig, active_arms: Sequence[str] | None = None) -> 
 
 class Session:
     """Context manager: start the stream with hold = measured for `sides`, take every side over; on exit release
-    exactly the sides it took over, stop the stream once and re-raise the original exception.
+    exactly the sides it took over, stop the stream once and re-raise the original exception. Before it publishes
+    anything it waits for DDS discovery and refuses if any side's command topic carries foreign messages.
 
     `cm` maps each side to its arm's controller manager. The adapters are deactivated (back to identity) only after
     the stream stopped, so a relative-mode command never jumps while a controller may still follow it. A
@@ -435,6 +447,10 @@ class Session:
         self._entered = True
         tk = self.cfg.takeover
         try:
+            # Never fight another publisher: check every command topic before publishing anything on any of them.
+            _wait_discovery(self.graph, tk, self.sleep)
+            for side in self.sides:
+                _check_no_foreign_messages(side, self.cfg.arms[side], self.graph)
             hold = {side: self.graph.measured(side) for side in self.sides}
             missing = [side for side, q in hold.items() if q is None]
             if missing:

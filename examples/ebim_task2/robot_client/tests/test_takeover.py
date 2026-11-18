@@ -359,6 +359,28 @@ def test_refuses_foreign_messages_warns_on_idle_endpoint(caplog):
     assert any(topic in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
 
 
+def test_session_checks_foreign_messages_before_publishing_anything():
+    rig = Rig(uptime0=0.0)
+    with rig.session():
+        pass
+    first_pub = rig.index(lambda e: e[0] == "pub")
+    for side in SIDES:
+        topic = rig.cfg.arms[side].command_topic
+        assert rig.index(lambda e, topic=topic: e[:2] == ("foreign", topic)) < first_pub
+    assert rig.log[first_pub][3] >= rig.cfg.takeover.discovery_wait_s  # after the discovery wait
+
+    # GELLO still publishing on the right arm: refuse before streaming on any arm
+    rig = Rig()
+    topic = rig.cfg.arms["right"].command_topic
+    rig.graph.foreign[topic] = 5
+    with pytest.raises(TakeoverError) as excinfo, rig.session():
+        pytest.fail("not reached")
+    assert topic in str(excinfo.value)
+    assert "is GELLO teleop still running?" in str(excinfo.value)
+    assert not rig.streamer.running
+    assert not any(e[0] in ("pub", "switch", "activate") for e in rig.log)
+
+
 # ---- controller states ----
 
 
@@ -486,8 +508,8 @@ def test_interrupt_during_takeover_releases_only_what_we_activated(where):
         # left fully taken over; Ctrl-C while right's pre-checks run, before right is switched: Session releases left
         right_topic = rig.cfg.arms["right"].command_topic
 
-        def interrupt(topic):
-            if topic == right_topic:
+        def interrupt(topic):  # the 1st check of the right topic is Session's, before streaming; the 2nd is takeover's
+            if topic == right_topic and sum(e[:2] == ("foreign", right_topic) for e in rig.log) == 2:
                 raise KeyboardInterrupt("ctrl-c")
 
         rig.graph.foreign_hook = interrupt
