@@ -1,10 +1,12 @@
 """The CLI with monkeypatched ROS factories (fake node, controller managers, motion backend, console), the real
 Streamer / Session / Runner and the stub policy server. No ROS."""
 
+import io
 import json
 import os
 from pathlib import Path
 import signal
+import threading
 import time
 from typing import ClassVar
 
@@ -12,11 +14,13 @@ import numpy as np
 import pytest
 from robot_client import checks
 from robot_client import cli
+from robot_client.config import load_site_config
 from robot_client.keys import ENTER
 from robot_client.prepare import PrepareReport
 from robot_client.prepare import StepResult
 from robot_client.preprocess import Snapshot
 from robot_client.runner import EpisodeOutcome
+from robot_client.runner import required_stream_keys
 
 MUNICH_YAML = Path(__file__).resolve().parents[1] / "robot_site.munich.yaml"
 CTRL = "joint_impedance_controller"
@@ -30,6 +34,7 @@ class ScriptedConsole:
         self.keys = list(keys)
         self.prompts = []
         self.polls = 0
+        self.discards = 0
         self.closed = False
 
     def read_line(self, prompt):
@@ -40,6 +45,9 @@ class ScriptedConsole:
         self.polls += 1
         assert self.polls < 2000, "the CLI kept polling for a key that the script never sends"
         return self.keys.pop(0) if self.keys else None
+
+    def discard_pending(self):
+        self.discards += 1
 
     def close(self):
         self.closed = True
@@ -556,3 +564,82 @@ def test_console_reads_keys_and_lines_from_a_pipe():
         assert console.poll() is None
         assert console.read_line("? ") is None  # EOF
         console.close()
+
+
+# ---- stale keys on a TTY never answer a motion gate ----
+
+
+@pytest.fixture
+def pty_console():
+    """A real Console on a pseudo-terminal (cbreak like on the operator's TTY); yields (console, type_fn)."""
+    pty = pytest.importorskip("pty")
+    try:
+        master, slave = pty.openpty()
+    except OSError as e:
+        pytest.skip(f"no pty available: {e}")
+    stream = os.fdopen(slave, "r")
+    console = cli.Console(stream, out=io.StringIO())
+    assert console._tty  # noqa: SLF001 - the test needs the TTY path
+
+    timers = []
+
+    def type_keys(data: bytes, after_s: float = 0.0):
+        if after_s:
+            timer = threading.Timer(after_s, os.write, (master, data))
+            timers.append(timer)
+            timer.start()
+        else:
+            os.write(master, data)
+            time.sleep(0.05)  # let the line discipline queue it
+
+    yield console, type_keys
+    for timer in timers:
+        timer.join()
+    console.close()
+    stream.close()
+    os.close(master)
+
+
+def test_tty_enter_typed_before_a_prompt_does_not_answer_it(pty_console):
+    console, type_keys = pty_console
+    type_keys(b"\n")  # Enter pressed while the client was busy (connecting, prepare, PTP, takeover)
+    type_keys(b"k\n", after_s=0.3)  # the operator's real answer, after the prompt is shown
+    assert console.read_line(cli.RESET_PROMPT) == "k"
+    type_keys(b"\n")  # pressed right after answering, before the next prompt
+    type_keys(b"q\n", after_s=0.3)
+    assert console.read_line("Workspace clear, E-stop at hand? [Enter] start / [q] quit: ") == "q"
+
+
+class _HealthyStreamer:
+    fault = None
+
+    def healthy(self):
+        return True
+
+
+class _LiveWorker:
+    error = None
+
+    def is_alive(self):
+        return True
+
+
+def test_tty_enter_typed_during_takeover_does_not_start_the_policy(pty_console, monkeypatch):
+    console, type_keys = pty_console
+    cfg = load_site_config(MUNICH_YAML, [], {})
+    run = cli._RunCommand.__new__(cli._RunCommand)  # noqa: SLF001 - only what _wait_start reads
+    run.cfg, run.console, run.worker = cfg, console, _LiveWorker()
+    run.required = required_stream_keys(cfg)
+    run.node = FakeNode(cfg, "live", world=None)
+    type_keys(b"\n")  # Enter pressed while prepare / takeover were still running
+    type_keys(b"q", after_s=0.3)
+    verdict, _ = run._wait_start(_HealthyStreamer())  # noqa: SLF001
+    assert verdict == "quit"
+
+
+def test_start_gate_discards_pending_keys_before_prompting(tmp_path, monkeypatch, stub_server):
+    server = stub_server(layout_id="munich16", latency_s=0.01)
+    console = ScriptedConsole(lines=["k"], keys=["q"])
+    World(monkeypatch, console)
+    assert cli.main(["run", *base_args(tmp_path)], env=server_env(server.port)) == 0
+    assert console.discards == 1

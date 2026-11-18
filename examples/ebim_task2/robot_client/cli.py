@@ -204,7 +204,8 @@ class Console:
     line, blocking; None at end of input).
 
     On a TTY, keys are single key presses (`TerminalKeys`, cbreak); `read_line` closes it (normal echo and line
-    editing), reads, and reopens it. Anything else (a pipe, a file) feeds both from one line buffer read straight from
+    editing), discards whatever was typed before the prompt, reads, and reopens it. `discard_pending()` does the same
+    discard for a key-polled gate (the start gate). Anything else (a pipe, a file) feeds both from one line buffer read straight from
     the file descriptor, so a scripted stdin works: `poll()` returns the first character of the next line (an empty
     line is Enter).
     """
@@ -230,12 +231,23 @@ class Console:
         text = line.strip()
         return text[0].lower() if text else ENTER
 
+    def discard_pending(self) -> None:
+        """On a TTY, drop every key typed before now (an Enter pressed while the client was busy must never answer a
+        gate shown later). Pipe / file input is a script and is kept."""
+        if self._tty:
+            import termios
+
+            termios.tcflush(self._fd, termios.TCIFLUSH)
+
     def read_line(self, prompt: str) -> str | None:
+        """Show `prompt` and read the answer; on a TTY, keys typed before the prompt was shown are discarded."""
+        if self._tty:
+            if self._keys is not None:
+                self._keys.close()  # canonical mode back first: a flush before it could miss queued bytes
+            self.discard_pending()
         self._out.write(prompt)
         self._out.flush()
         if self._tty:
-            if self._keys is not None:
-                self._keys.close()
             try:
                 line = self._stream.readline()
             finally:
@@ -852,7 +864,9 @@ class _RunCommand:
 
     def _wait_start(self, streamer: Streamer) -> tuple[str, str]:
         """Poll the operator's key while the hold streams; the stream health and the safety evaluation are checked
-        every GATE_POLL_S. Returns ("start" | "quit" | "freeze", reason)."""
+        every GATE_POLL_S. Returns ("start" | "quit" | "freeze", reason). Keys typed before the prompt (e.g. an Enter
+        pressed during prepare or takeover) are discarded first."""
+        self.console.discard_pending()
         print(START_PROMPT, flush=True)
         shown = None
         while True:
