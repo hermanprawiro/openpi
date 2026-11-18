@@ -142,6 +142,7 @@ class FakeCM:
         self.world = world
         self.state = "inactive"
         self.on_deactivate = None
+        self.refuse_deactivate = False  # switch_controller refuses every deactivation
 
     def list_controllers(self):
         return {CTRL: self.state, "joint_state_broadcaster": "active"}
@@ -150,6 +151,8 @@ class FakeCM:
         if deactivate and self.on_deactivate is not None:
             self.on_deactivate()
         self.world.log.append(("switch", self.side, tuple(activate), tuple(deactivate)))
+        if deactivate and self.refuse_deactivate:
+            return False
         for _ in activate:
             self.state = "active"
         for _ in deactivate:
@@ -584,6 +587,58 @@ def test_takeover_refused_by_a_foreign_publisher_exits_2(tmp_path, monkeypatch, 
     assert "/right/gello/joint_states" in capsys.readouterr().err
     assert "switch" not in world.kinds()
     assert world.nodes[0].arm_msgs == {"left": 0, "right": 0}  # refused before streaming anything
+
+
+def test_failed_deactivation_exits_5_and_never_says_released(tmp_path, monkeypatch, capsys, stub_server):
+    """The left controller cannot be deactivated: the hold keeps streaming, the operator gets a loud message and
+    confirms with Enter; the run exits 5 (not 0, not 'Released.')."""
+    from robot_client import takeover
+
+    monkeypatch.setattr(takeover, "RELEASE_RETRY_S", 0.5)
+    server = stub_server(layout_id="munich16", latency_s=0.01)
+
+    def hook(cms):
+        cms["left"].refuse_deactivate = True
+
+    console = ScriptedConsole(lines=["k"], keys=[ENTER, None, "x", ENTER])
+    world = World(monkeypatch, console, cm_hook=hook)
+    monkeypatch.setattr(cli, "Runner", _Runner)
+    code = cli.main(["run", *base_args(tmp_path), "--episodes", "1"], env=server_env(server.port))
+    out = capsys.readouterr()
+    assert code == cli.EXIT_STILL_ACTIVE == 5
+    assert "Released." not in out.out
+    assert "CONTROLLER STILL ACTIVE on /left/controller_manager" in out.err
+    assert "has been released" not in out.err
+    assert world.cms["left"].state == "active"
+    assert world.cms["right"].state == "inactive"
+    assert len([e for e in world.log if e == ("switch", "left", (), (CTRL,))]) > 1  # retried
+    assert console.discards >= 2  # start gate + the still-active prompt: type-ahead never confirms
+    assert not console.keys  # the operator's Enter ended the wait
+    (ep,) = episode_dirs(tmp_path)
+    assert json.loads((ep / "result.json").read_text())["outcome"] == "freeze"
+
+
+def test_operator_ack_discards_type_ahead():
+    console = ScriptedConsole(keys=[ENTER, ENTER])
+    ack = cli._operator_ack(console)  # noqa: SLF001
+    assert ack() is False  # the first call only discards what was typed before the message
+    assert console.discards == 1
+    assert ack() is True
+
+
+@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
+def test_signal_guard_turns_signals_into_one_interrupt(sig, capfd):
+    """SIGHUP too: python is PID 1 in the container, so an unhandled SIGHUP (closed terminal) would be ignored."""
+    guard = cli.SignalGuard()
+    guard.install()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            signal.raise_signal(sig)
+        signal.raise_signal(sig)  # after the first: only the message
+        assert cli.RELEASING_MESSAGE in capfd.readouterr().err
+    finally:
+        guard.restore()
+    assert signal.getsignal(signal.SIGHUP) is not guard._handle  # noqa: SLF001
 
 
 # ---- release ----

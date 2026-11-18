@@ -122,6 +122,12 @@ class EventSink(Protocol):
 # ---- helpers ----
 
 
+def _say(*args, **kwargs) -> None:
+    """print() for the release path: a closed terminal (SIGHUP) must never cut a release short."""
+    with contextlib.suppress(OSError, ValueError):
+        print(*args, **kwargs)
+
+
 def _list(side: str, arm: ArmConfig, cm: ControllerManager) -> dict[str, str]:
     try:
         return dict(cm.list_controllers())
@@ -629,7 +635,7 @@ class Session:
                 rel.error(f"{side}: resetting the command adapter failed: {type(e).__name__}: {e}")
         self.still_active = list(rel.still_active)
         for err in rel.errors:
-            print(f"release: {err}", file=sys.stderr, flush=True)
+            _say(f"release: {err}", file=sys.stderr, flush=True)
         if rel.errors:
             self._event("release_errors", errors=list(rel.errors))
         self._event(
@@ -747,7 +753,7 @@ class _Release:
                 pending[side] = (ours, t0 + RELEASE_RETRY_S)
             else:  # active, not activated by us: the operator deactivates it
                 arm = s.cfg.arms[side]
-                print(
+                _say(
                     f"[{side}] deactivate {arm.controller} on {arm.controller_manager} now (the client keeps "
                     f"streaming the hold until it reads inactive; waiting up to {EXTERNAL_WAIT_S:.0f} s)",
                     flush=True,
@@ -789,7 +795,7 @@ class _Release:
     def _announce_still_active(self, side: str) -> None:
         arm = self.s.cfg.arms[side]
         bar = "!" * 100
-        print(
+        _say(
             f"{bar}\n! CONTROLLER STILL ACTIVE on {arm.controller_manager} ({arm.controller}) — deactivate it now "
             "or press the E-stop.\n! The client keeps streaming the hold until it reads inactive. Press Enter once "
             f"you have handled it.\n{bar}",

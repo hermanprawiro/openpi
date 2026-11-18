@@ -10,11 +10,13 @@
                                                    episodes: prepare -> takeover -> policy -> release -> outcome
     release [--arm SIDE ...]                       deactivate the configured controller (recovery tool)
 
-Exit codes: 0 ok, 2 check failed / refused, 3 an episode ended in FREEZE, 4 configuration or usage error, 130
-interrupted (Ctrl-C / SIGTERM; everything we activated was released first).
+Exit codes: 0 ok, 2 check failed / refused, 3 an episode ended in FREEZE, 4 configuration or usage error, 5 a
+controller could not be confirmed inactive after the release (CONTROLLER STILL ACTIVE; the operator confirmed with
+Enter), 130 interrupted (Ctrl-C / SIGTERM / SIGHUP; everything we activated was released first).
 
-Nothing moves without an operator Enter: every prepare, takeover and episode start waits for one. SIGINT and SIGTERM
-raise KeyboardInterrupt, so the Session's release runs; while a release runs, and after the first interrupt, further
+Nothing moves without an operator Enter: every prepare, takeover and episode start waits for one. SIGINT, SIGTERM and
+SIGHUP (a closed terminal; python is PID 1 in the container, where an unhandled SIGHUP is ignored) raise
+KeyboardInterrupt, so the Session's release runs; while a release runs, and after the first interrupt, further
 signals are ignored ("releasing — wait, or use the E-stop"). `run --dry-run` never builds a controller manager, motion
 backend or Session and uses a node in `preview` mode (no command-topic or gripper publishers).
 
@@ -23,7 +25,7 @@ module loads without rclpy and tests replace the factories).
 """
 
 import argparse
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import contextlib
 import dataclasses
 import io
@@ -62,6 +64,7 @@ from robot_client.runner import Runner
 from robot_client.runner import required_stream_keys
 from robot_client.smoother import make_smoother
 from robot_client.streamer import Streamer
+from robot_client.takeover import ControllerStillActive
 from robot_client.takeover import Session
 from robot_client.takeover import TakeoverError
 from robot_client.takeover import session_sides
@@ -72,6 +75,7 @@ EXIT_OK = 0
 EXIT_REFUSED = 2
 EXIT_FREEZE = 3
 EXIT_CONFIG = 4
+EXIT_STILL_ACTIVE = 5
 EXIT_INTERRUPTED = 130
 
 DEFAULT_SITE = "/config/robot_site.yaml"
@@ -150,7 +154,7 @@ def make_adapters(cfg: SiteConfig, sides: Sequence[str]) -> dict[str, CommandAda
 
 
 class SignalGuard:
-    """SIGINT / SIGTERM -> KeyboardInterrupt, once. After that first interrupt, and while `releasing()` is active,
+    """SIGINT / SIGTERM / SIGHUP -> KeyboardInterrupt, once. After that first interrupt, and while `releasing()` is active,
     further signals only print RELEASING_MESSAGE: nothing may cut a release short."""
 
     def __init__(self):
@@ -159,7 +163,7 @@ class SignalGuard:
         self._previous: dict = {}
 
     def install(self) -> None:
-        for sig in (signal.SIGINT, signal.SIGTERM):
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             self._previous[sig] = signal.signal(sig, self._handle)
 
     def restore(self) -> None:
@@ -184,7 +188,8 @@ class SignalGuard:
 
 
 class GuardedSession(Session):
-    """A `Session` whose release (hold, deactivate, stop the stream) runs with further signals ignored."""
+    """A `Session` whose release (hold, deactivate, stop the stream) runs with further signals ignored. An interrupt
+    landing before the deferral is entered re-runs the release (`Session._close_guarded`)."""
 
     def __init__(self, *args, guard: SignalGuard, **kwargs):
         super().__init__(*args, **kwargs)
@@ -193,6 +198,22 @@ class GuardedSession(Session):
     def _close(self) -> bool:
         with self._guard.releasing():
             return super()._close()
+
+
+def _operator_ack(console) -> Callable[[], bool]:
+    """The release's CONTROLLER STILL ACTIVE wait: True once the operator pressed Enter after the message was shown
+    (the first call discards keys typed before it, so a type-ahead Enter never confirms)."""
+    shown = False
+
+    def ack() -> bool:
+        nonlocal shown
+        if not shown:
+            shown = True
+            console.discard_pending()
+            return False
+        return console.poll() == ENTER
+
+    return ack
 
 
 # ----------------------------------------------------------------------------------------------------
@@ -433,6 +454,9 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
             flush=True,
         )
         return EXIT_REFUSED
+    except ControllerStillActive as e:
+        print(f"CONTROLLER STILL ACTIVE: {e}", file=sys.stderr, flush=True)
+        return EXIT_STILL_ACTIVE
     except KeyboardInterrupt:
         print("\nInterrupted. Everything this client activated has been released (see above).", file=sys.stderr)
         return EXIT_INTERRUPTED
@@ -570,7 +594,16 @@ def cmd_check_motion(ctx: Context) -> int:
         _require_live(node)
         adapters = make_adapters(cfg, (side,))
         streamer = make_streamer(cfg, node, (side,), adapters)
-        session = GuardedSession(cfg, (side,), {side: cms[side]}, node, streamer, adapters, guard=ctx.guard)
+        session = GuardedSession(
+            cfg,
+            (side,),
+            {side: cms[side]},
+            node,
+            streamer,
+            adapters,
+            guard=ctx.guard,
+            ack=_operator_ack(ctx.console),
+        )
         report = checks.check_motion(
             side, joints, args.delta, cfg=cfg, session=session, streamer=streamer, measured=node.measured
         )
@@ -790,7 +823,15 @@ class _RunCommand:
         streamer = make_streamer(cfg, self.node, self.sides, adapters)
         cms = {side: self.cms[side] for side in self.sides}
         session = GuardedSession(
-            cfg, self.sides, cms, self.node, streamer, adapters, recorder=self.recorder, guard=self.ctx.guard
+            cfg,
+            self.sides,
+            cms,
+            self.node,
+            streamer,
+            adapters,
+            recorder=self.recorder,
+            guard=self.ctx.guard,
+            ack=_operator_ack(self.console),
         )
         self._ep = None
         try:
@@ -800,6 +841,9 @@ class _RunCommand:
             raise Refused(f"takeover refused: {e}") from e
         except KeyboardInterrupt:
             self._abandon_episode(streamer)
+            raise
+        except ControllerStillActive:
+            self._abandon_episode(streamer, "release: a controller could not be confirmed inactive")
             raise
         print("Released.", flush=True)
         return self._conclude(idx, result, streamer)
@@ -944,13 +988,12 @@ class _RunCommand:
         self._event("outcome", episode=idx, outcome=choice)
         return "done"
 
-    def _abandon_episode(self, streamer: Streamer) -> None:
-        """Ctrl-C mid-episode: close the episode's records as a freeze (the release already ran)."""
+    def _abandon_episode(self, streamer: Streamer, note: str = "interrupted (Ctrl-C / SIGTERM / SIGHUP)") -> None:
+        """Ctrl-C mid-episode (or a release that could not confirm a controller inactive): close the episode's
+        records as a freeze (the release already ran)."""
         if self._ep is not None:
-            self._ep.finish(
-                "freeze", "interrupted (Ctrl-C / SIGTERM)", {"dry_run": self.dry}, self._stream_stats(streamer)
-            )
-        self._event("interrupted")
+            self._ep.finish("freeze", note, {"dry_run": self.dry}, self._stream_stats(streamer))
+        self._event("interrupted", note=note)
 
     def _stream_stats(self, streamer: Streamer) -> dict:
         try:

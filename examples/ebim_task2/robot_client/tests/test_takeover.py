@@ -924,3 +924,25 @@ def test_frame_id_is_unique_per_process():
     }
     assert len(ids) == 2
     assert takeover_module.OUR_FRAME_ID not in ids
+
+
+def test_release_survives_a_closed_terminal(monkeypatch):
+    """After a SIGHUP the terminal is gone and writes fail: the release must still hold, wait and stop the stream."""
+    import builtins
+
+    rig = Rig(["takeover.mode=external"])
+    for side in SIDES:
+        rig.cms[side].operator_activates_on_list = 3
+    with rig.session():
+        real_print = builtins.print
+
+        def broken_print(*args, **kwargs):
+            raise OSError(5, "Input/output error")
+
+        monkeypatch.setattr(builtins, "print", broken_print)
+        for side in SIDES:
+            rig.cms[side].operator_deactivates_on_list = rig.cms[side].lists + 3
+    monkeypatch.setattr(builtins, "print", real_print)
+    assert rig.streamer.stops == 1
+    for side in SIDES:
+        assert rig.log.index(("operator_deactivate", side)) < rig.log.index(("stop",))
