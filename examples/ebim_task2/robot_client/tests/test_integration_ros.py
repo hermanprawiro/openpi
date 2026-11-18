@@ -322,8 +322,8 @@ def run_one_episode(client: Proc, *, prepare: bool) -> int:
 
 
 def commands(robot: FakeRobot, side: str) -> list[dict]:
-    """Commands the client sent to `side` (its own frame_id), in arrival order."""
-    return robot.events("command", side=side, frame_id="robot_client")
+    """Commands a robot client sent to `side` (frame_id `robot_client:<process id>`), in arrival order."""
+    return [e for e in robot.events("command", side=side) if e["frame_id"].startswith("robot_client:")]
 
 
 def switches(robot: FakeRobot, side: str, action: str) -> list[dict]:

@@ -73,6 +73,9 @@ class FakeNode:
     def measured(self, side):
         return self.q[side].copy()
 
+    def measured_age(self, side):
+        return 0.005
+
     def publish_arm(self, side, q):
         self.arm_msgs[side] += 1
         if self.follow:

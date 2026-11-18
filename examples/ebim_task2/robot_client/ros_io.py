@@ -4,7 +4,7 @@
 which matches both reliable and best-effort publishers), stores the latest decoded sample of each stream with its
 `time.monotonic()` arrival time and per-stream counters, and publishes the arm joint targets and gripper widths. It
 implements `runner.ObsSource` (`snapshot`) and `takeover.GraphView` (`uptime_s`, `count_publishers`,
-`foreign_messages`, `measured`); `publish_arm` / `measured` are the streamer's callables. `command_mode`:
+`foreign_messages`, `measured`, `measured_age`); `publish_arm` / `measured` are the streamer's callables. `command_mode`:
 `live` publishes on the configured command topics, `preview` publishes arm targets on
 `/<side>/robot_client_preview/joint_states` and suppresses gripper commands, `none` creates no command publishers.
 
@@ -329,6 +329,14 @@ class RobotNode(Node):
             stream = self._streams.get(f"arm/{side}")
             value = None if stream is None else stream.value
             return None if value is None else value.copy()
+
+    def measured_age(self, side: str) -> float:
+        """Seconds since the latest decodable measured sample of `side` arrived (inf before the first)."""
+        with self._lock:
+            stream = self._streams.get(f"arm/{side}")
+            if stream is None or stream.t_sample is None:
+                return math.inf
+            return time.monotonic() - stream.t_sample
 
     def uptime_s(self) -> float:
         return time.monotonic() - self._t0

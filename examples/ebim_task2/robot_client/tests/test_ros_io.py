@@ -264,6 +264,37 @@ def test_foreign_messages_counts_only_other_frame_ids_within_the_window(cfg, mak
         node.foreign_messages("/some/other/topic", 1.0)
 
 
+def test_another_robot_client_instance_is_foreign(cfg, make_node, helper):
+    """A second robot_client process (its own `robot_client:<id>` frame_id) is a foreign publisher."""
+    node = make_node(cfg, command_mode="none")
+    topic = cfg.arms["right"].command_topic
+    pub = helper.node.create_publisher(JointState, topic, 10)
+    other = "robot_client:deadbeef"
+    assert other != OUR_FRAME_ID
+
+    def seen():
+        pub.publish(joint_state(cfg.arms["right"].joint_names, np.zeros(7), frame_id=other))
+        return node.foreign_messages(topic, 1.0) > 0
+
+    wait_until(seen, what="a message from another robot_client instance")
+
+
+def test_measured_age_tracks_the_last_sample(cfg, make_node, helper):
+    node = make_node(cfg)
+    assert node.measured_age("left") == float("inf")
+    pub = helper.node.create_publisher(JointState, cfg.arms["left"].measured_topic, 10)
+
+    def have():
+        pub.publish(joint_state(cfg.arms["left"].joint_names, np.zeros(7)))
+        return node.measured("left") is not None
+
+    wait_until(have, what="left joints")
+    assert node.measured_age("left") < 0.5
+    time.sleep(0.4)  # the stream stops
+    assert node.measured_age("left") >= 0.4
+    assert node.measured_age("nonexistent") == float("inf")
+
+
 def test_foreign_messages_from_a_best_effort_publisher_are_seen(cfg, make_node, helper):
     node = make_node(cfg, command_mode="none")
     topic = cfg.arms["left"].command_topic

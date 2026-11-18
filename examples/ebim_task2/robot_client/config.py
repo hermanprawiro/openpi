@@ -101,6 +101,12 @@ class TakeoverConfig:
     tol_rad: float = 0.02
     service_timeout_s: float = 5.0
     hold_inactive_arms: bool = True
+    # The newest measured joint sample must be at most this old whenever takeover builds the hold or checks the
+    # tolerance (a dead joint state stream would otherwise compare a stale pose with itself).
+    max_measured_age_s: float = 0.3
+    # An impedance controller that is already active when the client starts is refused (it would act on our very
+    # first message). true: stream into it anyway (only if you know it follows absolute targets).
+    accept_active: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -477,7 +483,7 @@ def _validate_state(c: _Ctx) -> None:
 
 
 def _validate_takeover(c: _Ctx) -> None:
-    c.positive("discovery_wait_s", "tol_rad", "service_timeout_s")
+    c.positive("discovery_wait_s", "tol_rad", "service_timeout_s", "max_measured_age_s")
     c.non_negative("warm_cycles")
 
 

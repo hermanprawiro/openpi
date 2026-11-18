@@ -6,11 +6,15 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from robot_client import takeover as takeover_module
 from robot_client.command import CommandAdapter
 from robot_client.config import load_site_config
 from robot_client.smoother import RateLimiter
 from robot_client.streamer import Streamer
+from robot_client.takeover import EXTERNAL_WAIT_S
+from robot_client.takeover import RELEASE_RETRY_S
 from robot_client.takeover import RELEASE_TAIL_S
+from robot_client.takeover import ControllerStillActive
 from robot_client.takeover import Session
 from robot_client.takeover import TakeoverError
 from robot_client.takeover import release
@@ -55,6 +59,7 @@ class FakeGraph:
         self.rig = rig
         self.uptime0 = uptime0
         self.measured_q = {side: q.copy() for side, q in MEASURED.items()}
+        self.ages = dict.fromkeys(MEASURED, 0.005)  # seconds since the last measured sample, per side
         self.publishers = {}  # topic -> endpoints incl. ours (default 1)
         self.foreign = {}  # topic -> foreign messages in the window
         self.foreign_hook = None
@@ -65,6 +70,9 @@ class FakeGraph:
     def measured(self, side):
         q = self.measured_q.get(side)
         return None if q is None else q.copy()
+
+    def measured_age(self, side):
+        return self.ages.get(side, float("inf")) if self.measured_q.get(side) is not None else float("inf")
 
     def count_publishers(self, topic):
         return self.publishers.get(topic, 1)
@@ -86,9 +94,12 @@ class FakeCM:
         self.apply = True
         self.list_error = None
         self.switch_error = None  # raised for any switch
-        self.deactivate_error = None  # raised for deactivation switches only
+        self.deactivate_error = None  # raised once, by the next deactivation switch
+        self.after_switch_hook = None  # called after a switch took effect (may raise, like a Ctrl-C during the reply)
         self.list_hook = None
         self.operator_activates_on_list = None  # external mode: the operator activates on the n-th list call
+        self.operator_deactivates_on_list = None  # the operator deactivates (own tooling) on the n-th list call
+        self.refuse_deactivate = 0  # this many deactivation switches return False (and change nothing)
         self.lists = 0
 
     def list_controllers(self):
@@ -99,7 +110,12 @@ class FakeCM:
         if self.list_error is not None:
             raise self.list_error
         if self.operator_activates_on_list is not None and self.lists >= self.operator_activates_on_list:
+            self.operator_activates_on_list = None
             self.states[CTRL] = "active"
+        if self.operator_deactivates_on_list is not None and self.lists >= self.operator_deactivates_on_list:
+            self.operator_deactivates_on_list = None
+            self.states[CTRL] = "inactive"
+            self.rig.log.append(("operator_deactivate", self.side))
         return dict(self.states)
 
     def switch(self, activate, deactivate, timeout_s):
@@ -107,12 +123,18 @@ class FakeCM:
         if self.switch_error is not None:
             raise self.switch_error
         if deactivate and self.deactivate_error is not None:
-            raise self.deactivate_error
+            error, self.deactivate_error = self.deactivate_error, None  # one-shot
+            raise error
+        if deactivate and self.refuse_deactivate:
+            self.refuse_deactivate -= 1
+            return False
         if self.apply:
             for c in activate:
                 self.states[c] = "active"
             for c in deactivate:
                 self.states[c] = "inactive"
+        if self.after_switch_hook is not None:
+            self.after_switch_hook(activate, deactivate)
         return True
 
 
@@ -143,6 +165,10 @@ class ManualStreamer(Streamer):
     def start(self, hold, *, thread=True):
         super().start(hold, thread=False)
         self.running = True
+
+    def hold(self, side=None):
+        self.log.append(("hold", side))
+        super().hold(side)
 
     def stop(self):
         self.stops += 1
@@ -193,6 +219,13 @@ class Rig:
         )
         self.time.streamer = self.streamer
         self.recorder = FakeRecorder()
+        self.acks = 0
+        self.ack_after = None  # the operator presses Enter on this many-th poll of the still-active prompt
+
+    def ack(self):
+        self.acks += 1
+        assert self.acks < 100_000, "the release kept waiting for an operator Enter the test never gives"
+        return self.ack_after is not None and self.acks >= self.ack_after
 
     def publish(self, side, cmd):
         self.log.append(("pub", side, np.array(cmd, copy=True), self.time.t))
@@ -207,6 +240,8 @@ class Rig:
             self.adapters,
             recorder=self.recorder,
             sleep=self.time.sleep,
+            clock=lambda: self.time.t,
+            ack=self.ack,
         )
 
     def start(self):
@@ -235,6 +270,10 @@ class Rig:
 
     def pubs(self, side, log=None):
         return [e for e in (self.log if log is None else log) if e[0] == "pub" and e[1] == side]
+
+
+def lists_at_exit(rig):
+    return rig.log.index(("exit",))
 
 
 def is_switch(side, kind):
@@ -282,8 +321,12 @@ def test_takeover_order(command_mode):
             switch = rig.log[i]
             assert switch[4] == rig.cfg.takeover.service_timeout_s
             assert switch[5] >= rig.cfg.takeover.discovery_wait_s
-        # the left switch happens before anything of the right takeover touches its controller
-        assert rig.index(is_switch("left", "activate")) < rig.index(lambda e: e == ("list", "right"))
+        # every controller state is read before anything is published (an active one would be refused) ...
+        first_pub = rig.index(lambda e: e[0] == "pub")
+        for side in SIDES:
+            assert rig.index(lambda e, side=side: e == ("list", side)) < first_pub
+        # ... and the left switch happens before the right takeover touches its controller again
+        assert rig.index(is_switch("left", "activate")) < rig.index(lambda e: e == ("list", "right"), first_pub)
         # the command stream stays continuous (equal to measured) across activation, in both command modes
         for side in SIDES:
             for e in rig.pubs(side):
@@ -316,12 +359,12 @@ def test_stream_outlives_the_last_deactivation():
         assert len(tail) >= round(RELEASE_TAIL_S * 100) - 1, f"{side}: {len(tail)} commands after the deactivation"
     assert RELEASE_TAIL_S in rig.time.sleeps
 
-    # nothing was activated by us (already active): no deactivation, no tail
+    # nothing was ever active (takeover refused on the left after streaming started): no deactivation, no tail
     rig = Rig()
-    for cm in rig.cms.values():
-        cm.states[CTRL] = "active"
-    with rig.session():
-        pass
+    rig.cms["left"].list_hook = lambda: rig.cms["left"].lists == 2 and rig.graph.ages.__setitem__("left", 1.0)
+    with pytest.raises(TakeoverError), rig.session():
+        pytest.fail("not reached")
+    assert rig.pubs("left")
     assert not rig.switches(kind="deactivate")
     assert RELEASE_TAIL_S not in rig.time.sleeps
 
@@ -359,6 +402,60 @@ def test_session_refuses_missing_measured():
 
 
 # ---- pre-checks ----
+
+
+def test_session_refuses_stale_measured_before_streaming():
+    """The measured stream died (e.g. while the operator sat at the reset prompt): the last sample is old, so
+    neither the hold nor any tolerance check may be built from it."""
+    rig = Rig()
+    rig.graph.ages["left"] = 2.0
+    with pytest.raises(TakeoverError) as excinfo, rig.session():
+        pytest.fail("not reached")
+    msg = str(excinfo.value)
+    assert "left" in msg
+    assert rig.cfg.arms["left"].measured_topic in msg
+    assert "takeover.max_measured_age_s" in msg
+    assert not any(e[0] in ("pub", "switch", "activate") for e in rig.log)
+
+
+def test_takeover_refuses_measured_going_stale_before_activation():
+    rig = Rig()
+    rig.start()
+
+    def die():  # the joint state broadcaster stops while the controller state is read
+        rig.graph.ages["left"] = 1.0
+
+    rig.cms["left"].list_hook = die
+    with pytest.raises(TakeoverError, match="max_measured_age_s"):
+        rig.takeover("left")
+    assert not any(e[0] in ("switch", "activate") for e in rig.log)
+    assert rig.cfg.takeover.max_measured_age_s == 0.3
+
+
+@pytest.mark.parametrize("mode", ["switch", "external"])
+def test_session_refuses_an_already_active_controller_before_streaming(mode):
+    """An active controller (left on by bring-up, after external mode, after a failed release) would act on our
+    very first message: refuse before publishing anything, and say how to get out of it."""
+    rig = Rig([f"takeover.mode={mode}"])
+    rig.cms["right"].states[CTRL] = "active"
+    with pytest.raises(TakeoverError) as excinfo, rig.session():
+        pytest.fail("not reached")
+    msg = str(excinfo.value)
+    assert "already active" in msg
+    assert "/right/controller_manager" in msg
+    assert "release --arm right" in msg
+    assert "takeover.accept_active" in msg
+    assert not any(e[0] in ("pub", "switch", "activate") for e in rig.log)
+    assert ("list", "right") in rig.log
+    assert rig.cms["right"].states[CTRL] == "active"
+
+
+def test_session_refuses_an_unusable_controller_state_before_streaming():
+    rig = Rig()
+    rig.cms["left"].states[CTRL] = "unconfigured"
+    with pytest.raises(TakeoverError, match="unconfigured"), rig.session():
+        pytest.fail("not reached")
+    assert not any(e[0] in ("pub", "switch", "activate") for e in rig.log)
 
 
 def test_refuses_foreign_messages_warns_on_idle_endpoint(caplog):
@@ -408,17 +505,29 @@ def test_session_checks_foreign_messages_before_publishing_anything():
 # ---- controller states ----
 
 
-def test_already_active_not_switched_not_deactivated(caplog):
-    rig = Rig()
-    rig.cms["left"].states[CTRL] = "active"
+def test_accept_active_streams_into_it_and_waits_for_the_operator_to_deactivate(caplog, capsys):
+    """takeover.accept_active (explicit opt-in): stream into an already-active controller, never switch it; on
+    release ask the operator to deactivate it and keep streaming the hold until it reads inactive."""
+    rig = Rig(["takeover.accept_active=true"])
+    left = rig.cms["left"]
+    left.states[CTRL] = "active"
     with caplog.at_level(logging.WARNING), rig.session() as session:
         assert session.activated_by_us == {"left": False, "right": True}
+        left.operator_deactivates_on_list = left.lists + 6  # the operator needs a few polls
+        rig.log.append(("exit",))
     assert rig.switches("left", kind="activate") == []
     assert rig.switches("left", kind="deactivate") == []
     assert any(e[:2] == ("activate", "left") for e in rig.log)  # the adapter reference is still captured
     assert any("already active" in r.getMessage() for r in caplog.records)
     assert len(rig.switches("right", kind="deactivate")) == 1
-    assert rig.cms["left"].states[CTRL] == "active"
+    assert left.states[CTRL] == "inactive"
+    assert f"[left] deactivate {CTRL} on /left/controller_manager now" in capsys.readouterr().out
+    assert session.still_active == []
+    # the hold kept streaming until the operator's deactivation was seen, then for the tail
+    seen = rig.log.index(("operator_deactivate", "left"))
+    stop = rig.log.index(("stop",))
+    assert len(rig.pubs("left", rig.log[seen:stop])) >= round(RELEASE_TAIL_S * 100) - 1
+    assert len(rig.pubs("left", rig.log[lists_at_exit(rig) : seen])) >= 50  # held while waiting for the operator
 
 
 def test_unconfigured_controller_points_to_external_mode():
@@ -457,10 +566,20 @@ def test_external_mode_never_switches(capsys):
         assert session.activated_by_us == {"left": False, "right": False}
         for side in SIDES:
             assert any(e[:2] == ("activate", side) for e in rig.log)
+            rig.cms[side].operator_deactivates_on_list = rig.cms[side].lists + 5
     assert not any(e[0] == "switch" for e in rig.log)
     out = capsys.readouterr().out
     assert f"activate {CTRL} on /left/controller_manager now" in out
     assert f"activate {CTRL} on /right/controller_manager now" in out
+    # release: the operator is asked to deactivate; the hold streams until both read inactive, then the tail
+    assert f"[left] deactivate {CTRL} on /left/controller_manager now" in out
+    assert f"[right] deactivate {CTRL} on /right/controller_manager now" in out
+    stop = rig.log.index(("stop",))
+    for side in SIDES:
+        seen = rig.log.index(("operator_deactivate", side))
+        assert seen < stop
+        assert len(rig.pubs(side, rig.log[seen:stop])) >= round(RELEASE_TAIL_S * 100) - 1
+    assert session.still_active == []
     assert rig.streamer.stops == 1
 
     # never activated: gives up after 60 s, still without switching
@@ -575,7 +694,7 @@ def test_release_attempts_all_sides_on_error(capsys):
     rig.cms["left"].deactivate_error = RuntimeError("left service down")
     with pytest.raises(ValueError, match="policy boom"), rig.session():
         raise ValueError("policy boom")  # the original exception is not masked by the release error
-    assert len(rig.switches("left", kind="deactivate")) == 1
+    assert len(rig.switches("left", kind="deactivate")) == 2  # failed once, retried while holding
     assert len(rig.switches("right", kind="deactivate")) == 1
     assert rig.log.index(("stop",)) > rig.index(is_switch("right", "deactivate"))
     assert rig.streamer.stops == 1
@@ -634,3 +753,174 @@ def test_inactive_arm_held_when_configured():
         assert session.activated_by_us == {"right": True}
     assert rig.cms["left"].lists == 0
     assert not any(e[0] == "pub" and e[1] == "left" for e in rig.log)
+
+
+# ---- release: a controller that does not go inactive is never left without the stream ----
+
+
+def test_release_holds_every_side_then_waits_once():
+    rig = Rig()
+    with rig.session():
+        n = len(rig.log)
+    hold = rig.index(lambda e: e == ("hold", None), n)
+    first_deactivate = min(rig.index(is_switch(side, "deactivate"), n) for side in SIDES)
+    assert hold < first_deactivate
+    assert rig.time.sleeps.count(0.5) == 1
+
+
+def test_refused_deactivation_is_retried_while_holding():
+    rig = Rig()
+    rig.cms["left"].refuse_deactivate = 2
+    with rig.session() as session:
+        pass
+    assert len(rig.switches("left", kind="deactivate")) == 3
+    assert rig.cms["left"].states[CTRL] == "inactive"
+    assert session.still_active == []
+    stop = rig.log.index(("stop",))
+    last = max(i for i, e in enumerate(rig.log) if is_switch("left", "deactivate")(e))
+    assert len(rig.pubs("left", rig.log[last:stop])) >= round(RELEASE_TAIL_S * 100) - 1
+
+
+@pytest.mark.parametrize("original", [None, ValueError("policy boom")])
+def test_failed_deactivation_keeps_holding_and_reports_loudly(original, capsys):
+    """switch_controller keeps refusing to deactivate: retry for RELEASE_RETRY_S while streaming the hold, then a loud
+    message, and keep holding until the operator confirms with Enter; never report success."""
+    rig = Rig()
+    rig.cms["left"].refuse_deactivate = 10**6
+    rig.ack_after = 30  # Enter after ~30 polls of the loud prompt
+
+    def body():
+        with rig.session():
+            if original is not None:
+                raise original
+
+    with pytest.raises(ControllerStillActive) as excinfo:
+        body()
+    if original is not None:
+        assert excinfo.value.__cause__ is original  # the original exception is kept
+    assert "/left/controller_manager" in str(excinfo.value)
+    err = capsys.readouterr().err
+    assert f"CONTROLLER STILL ACTIVE on /left/controller_manager ({CTRL})" in err
+    assert "E-stop" in err
+    assert len(rig.switches("left", kind="deactivate")) > 3  # retried
+    assert len(rig.switches("right", kind="deactivate")) == 1
+    assert rig.cms["left"].states[CTRL] == "active"
+    stop = rig.log.index(("stop",))
+    first = rig.index(is_switch("left", "deactivate"))
+    held = rig.pubs("left", rig.log[first:stop])
+    assert held[-1][3] - held[0][3] >= RELEASE_RETRY_S  # streamed the whole time
+    for e in held:
+        np.testing.assert_allclose(e[2], MEASURED["left"], atol=1e-12)  # a hold, never a move
+    assert rig.acks >= 30
+    kinds = dict(rig.recorder.events)
+    assert kinds["released"]["still_active"] == ["left"]
+
+
+def test_failed_deactivation_ends_when_the_operator_deactivates_it():
+    rig = Rig()
+    left = rig.cms["left"]
+    left.refuse_deactivate = 10**6
+
+    def operator(dt):  # the operator uses their own tooling once the loud message is out
+        if rig.acks == 5:
+            left.operator_deactivates_on_list = left.lists + 1
+
+    rig.time.hooks.append(operator)
+    with rig.session() as session:
+        pass
+    assert session.still_active == []
+    assert left.states[CTRL] == "inactive"
+    assert rig.log.index(("operator_deactivate", "left")) < rig.log.index(("stop",))
+
+
+def test_external_release_never_deactivated_reports_loudly(capsys):
+    rig = Rig(["takeover.mode=external"])
+    for side in SIDES:
+        rig.cms[side].operator_activates_on_list = 3
+    rig.ack_after = 3
+    with pytest.raises(ControllerStillActive), rig.session():
+        pass
+    assert rig.time.t >= EXTERNAL_WAIT_S
+    assert "CONTROLLER STILL ACTIVE on /left/controller_manager" in capsys.readouterr().err
+    assert not any(e[0] == "switch" for e in rig.log)
+
+
+def test_retry_after_an_interrupted_deactivation_reads_the_state_first():
+    rig = Rig()
+    left = rig.cms["left"]
+
+    def interrupted_reply(activate, deactivate):  # Ctrl-C after the controller_manager applied the switch
+        if deactivate:
+            left.after_switch_hook = None
+            raise KeyboardInterrupt("ctrl-c")
+
+    left.after_switch_hook = interrupted_reply
+    with pytest.raises(KeyboardInterrupt), rig.session() as session:
+        pass
+    assert len(rig.switches("left", kind="deactivate")) == 1  # inactive already: no second switch
+    assert session.still_active == []
+    errors = dict(rig.recorder.events).get("release_errors", {}).get("errors", [])
+    assert not any("refused" in e or "still active" in e for e in errors)
+
+
+def test_interrupt_right_after_takeover_returned_still_deactivates(monkeypatch):
+    """Ctrl-C between takeover() returning True and Session recording it: the switch is marked pending before it is
+    called, so the release still deactivates the controller."""
+    rig = Rig()
+    real = takeover_module.takeover
+
+    def takeover_then_ctrl_c(side, *args, **kwargs):
+        result = real(side, *args, **kwargs)
+        if side == "left":
+            raise KeyboardInterrupt("ctrl-c")
+        return result
+
+    monkeypatch.setattr(takeover_module, "takeover", takeover_then_ctrl_c)
+    with pytest.raises(KeyboardInterrupt), rig.session():
+        pytest.fail("not reached")
+    assert len(rig.switches("left", kind="deactivate")) == 1
+    assert rig.cms["left"].states[CTRL] == "inactive"
+    assert rig.log.index(("stop",)) > rig.index(is_switch("left", "deactivate"))
+
+
+def test_interrupt_on_entering_the_release_does_not_skip_it():
+    """A Ctrl-C landing in __exit__ before the release starts (e.g. before the CLI's signal deferral is entered)
+    must not skip the release."""
+
+    class Flaky(Session):
+        interrupts = 1
+
+        def _close(self):
+            if self.interrupts:
+                self.interrupts -= 1
+                raise KeyboardInterrupt("ctrl-c on entry")
+            return super()._close()
+
+    rig = Rig()
+    session = Flaky(
+        rig.cfg, rig.sides, rig.cms, rig.graph, rig.streamer, rig.adapters, sleep=rig.time.sleep, clock=lambda: 0.0
+    )
+    with pytest.raises(KeyboardInterrupt), session:
+        pass
+    for side in SIDES:
+        assert len(rig.switches(side, kind="deactivate")) == 1
+    assert rig.streamer.stops == 1
+
+
+def test_frame_id_is_unique_per_process():
+    """Every client process has its own frame_id, so a second client instance counts as a foreign publisher."""
+    import re
+    import subprocess
+    import sys
+
+    assert re.fullmatch(r"robot_client:[0-9a-f]{8}", takeover_module.OUR_FRAME_ID)
+    code = "from robot_client.takeover import OUR_FRAME_ID; print(OUR_FRAME_ID)"
+    pkg_parent = str(Path(takeover_module.__file__).resolve().parents[1])
+    ids = {
+        subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, check=True, cwd=pkg_parent
+        ).stdout.strip()
+        for _ in range(2)
+    }
+    assert len(ids) == 2
+    assert takeover_module.OUR_FRAME_ID not in ids
