@@ -159,6 +159,8 @@ class SafetyConfig:
     episode_timeout_s: float = 120.0
     q_margin_rad: float = 0.05
     gripper_deadband: float = 0.02
+    # Longest the 100 Hz command stream may go without publishing on a side before it counts as unhealthy.
+    stream_gap_freeze_s: float = 0.1
     # arm -> (q_min, q_max), 7 joints each.
     joint_limits: dict[str, tuple[tuple[float, ...], tuple[float, ...]]] = dataclasses.field(
         default_factory=_default_joint_limits
@@ -525,6 +527,7 @@ def _validate_safety(c: _Ctx) -> None:
         "infer_dry_freeze_s",
         "max_start_offset_rad",
         "episode_timeout_s",
+        "stream_gap_freeze_s",
     )
     c.non_negative("q_margin_rad", "gripper_deadband")
     hold, freeze = c.get("obs_stale_hold_s"), c.get("obs_stale_freeze_s")

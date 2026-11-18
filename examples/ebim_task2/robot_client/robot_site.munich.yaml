@@ -79,6 +79,7 @@ safety:
   episode_timeout_s: 120
   q_margin_rad: 0.05
   gripper_deadband: 0.02
+  stream_gap_freeze_s: 0.1
 
 smoother: {impl: ruckig, velocity_scale: 0.5}
 

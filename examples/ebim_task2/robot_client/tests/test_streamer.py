@@ -364,3 +364,88 @@ def test_safety_lag_is_configurable():
     Ticker(s).run(10)
     assert np.max(np.abs(robot.arr("left")[-1] - HOLD["left"])) <= 0.05 + 1e-12
     assert s.leash_engaged("left")
+
+
+class OvershootingSmoother:
+    """Tracks the target exactly but adds a fixed offset: forces an output beyond the joint limits."""
+
+    def __init__(self, offset):
+        self.offset = offset
+        self.stopped = False
+        self.resets = 0
+
+    def reset(self, q):
+        self.resets += 1
+
+    def stop(self):
+        self.stopped = True
+
+    def step(self, target, target_vel):
+        return np.asarray(target) + self.offset
+
+
+def test_hard_clamp_after_smoother():
+    robot = Robot()
+    offset = np.zeros(N)
+    offset[2] = 0.2  # q_max[2] = 2.9007; the margin-clamped target is 2.8507, +0.2 goes past q_max
+    made = []
+
+    def factory():
+        made.append(OvershootingSmoother(offset))
+        return made[-1]
+
+    s = make(robot, smoother_factory=factory)
+    hold = {side: HOLD[side].copy() for side in SIDES}
+    hold["left"][2] = 2.8
+    robot.stuck["left"] = hold["left"].copy()
+    s.start(hold, thread=False)
+    tick = Ticker(s)
+    tick.run(3)
+    assert s.hard_clamps == 3  # left only: 2.8 + 0.2 > q_max
+    q_max = LIMITS["left"][1]
+    pubs = robot.arr("left")
+    assert np.all(pubs[:, 2] == q_max[2])
+    np.testing.assert_array_equal(pubs[:, [0, 1, 3, 4, 5, 6]], np.tile(hold["left"][[0, 1, 3, 4, 5, 6]], (3, 1)))
+    wp = hold["left"].copy()
+    wp[2] = 3.2
+    s.set_waypoint("left", wp)
+    tick.run(10)
+    assert np.all(robot.arr("left")[:, 2] <= q_max[2])
+    assert s.hard_clamps == 13
+    assert made[0].resets == 1  # only the seed in start(): the clamp never resets the smoother
+    assert s.fault is None
+
+
+def test_healthy_uses_stream_gap_freeze_s():
+    robot = Robot()
+    stalled, release = threading.Event(), threading.Event()
+    offset = [0.0]
+
+    def publish(side, cmd):
+        if offset[0]:
+            stalled.set()
+            release.wait(5.0)
+        robot.publish(side, cmd)
+
+    s = Streamer(
+        SIDES,
+        publish,
+        robot.measured,
+        generous,
+        {side: CommandAdapter("absolute", np.ones(N)) for side in SIDES},
+        LIMITS,
+        dataclasses.replace(SAFETY, stream_gap_freeze_s=0.5),
+        clock=lambda: time.monotonic() + offset[0],
+    )
+    s.start(HOLD)
+    try:
+        _wait_for(lambda: len(robot.arr("right")) >= 5)
+        offset[0] = 1e-9  # stall the next publish; the clock is unchanged for now
+        assert stalled.wait(2.0)
+        offset[0] = 0.3  # last publish ~0.3 s ago: within 0.5
+        assert s.healthy()
+        offset[0] = 0.6  # ~0.6 s ago: beyond 0.5
+        assert not s.healthy()
+    finally:
+        release.set()
+        s.stop()

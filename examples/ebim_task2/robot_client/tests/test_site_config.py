@@ -41,6 +41,7 @@ def test_munich_yaml_loads_with_defaults(load):
     assert cfg.spine.height == 0.434
     assert cfg.safety.max_track_lag_rad == 0.5
     assert cfg.safety.episode_timeout_s == 120.0
+    assert cfg.safety.stream_gap_freeze_s == 0.1
     assert cfg.safety.joint_limits["left"][0][0] == -2.7437
     assert cfg.takeover.mode == "switch"
     assert cfg.stream_hz == 100
@@ -155,6 +156,7 @@ def test_missing_required_key_named(tmp_path):
         ("spine.height=-0.1", "spine.height"),
         ("command_mode=delta", "command_mode"),
         ("safety.obs_stale_freeze_s=0.5", "safety.obs_stale_freeze_s"),
+        ("safety.stream_gap_freeze_s=0", "safety.stream_gap_freeze_s"),
         ("safety.joint_limits={left: [[0],[1]]}", "safety.joint_limits"),
         ("smoother.velocity_scale=1.5", "smoother.velocity_scale"),
         ("smoother.v_max=[1,2]", "smoother.v_max"),

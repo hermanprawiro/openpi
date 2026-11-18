@@ -2,8 +2,9 @@
 
 Each tick (`step`), per side: linear interpolation from the current position to the latest 20 Hz
 waypoint over `waypoint_dt` -> tracking leash (if the interpolated target is more than
-`max_track_lag_rad` from the measured joints, the ramp does not advance) -> joint-limit clamp ->
-smoother -> command adapter -> publish. Without waypoints it publishes the hold pose it was started
+`max_track_lag_rad` from the measured joints, the ramp does not advance) -> joint-limit clamp (limits
+minus `q_margin_rad`) -> smoother -> hard clamp to the raw limits (a backstop that should never fire;
+counted in `hard_clamps`) -> command adapter -> publish. Without waypoints it publishes the hold pose it was started
 with, so there is always a command on the topic while the streamer runs.
 
 `step(now)` does one tick for a given time, so it is testable with a fake clock; the thread only calls
@@ -33,7 +34,6 @@ from robot_client.smoother import Smoother
 
 logger = logging.getLogger(__name__)
 
-HEALTHY_MAX_GAP_S = 0.05  # healthy() needs a publish on every side within this long
 _REST_TOL_RAD = 1e-6  # a braking smoother whose output moved less than this in a period is at rest
 _U_SNAP = 1e-9  # ramp parameter this close to 1 counts as the end of the segment (float accumulation)
 
@@ -62,6 +62,7 @@ class _Arm:
     still: bool = False  # while holding: the last smoother output did not move
     out: np.ndarray | None = None  # last smoother output (joint space)
     leash: bool = False
+    hard_clamped: bool = False  # the last tick's smoother output was outside [q_min, q_max]
     last_cmd: np.ndarray | None = None
     last_pub: float | None = None
     pubs: int = 0
@@ -103,6 +104,7 @@ class Streamer:
         self._measured = measured
         self._max_lag = safety.max_track_lag_rad
         self._margin = safety.q_margin_rad
+        self._max_gap = safety.stream_gap_freeze_s
         self.hz = float(hz)
         self.waypoint_dt = float(waypoint_dt)
         self._clock = clock
@@ -118,6 +120,7 @@ class Streamer:
         self.max_gap_s = dict.fromkeys(self.sides, 0.0)  # largest interval between publishes, per side
         self.leash_events = 0  # times a side's leash engaged (transitions, not cycles)
         self.limit_clamps = 0  # (side, tick) pairs whose target was clamped to the joint limits
+        self.hard_clamps = 0  # (side, tick) pairs whose smoother output had to be clamped to the raw limits
 
     # ---- control (any thread) ----
 
@@ -173,11 +176,11 @@ class Streamer:
     # ---- status (any thread) ----
 
     def healthy(self) -> bool:
-        """No fault, the thread is alive and every side published within `HEALTHY_MAX_GAP_S`."""
+        """No fault, the thread is alive and every side published within `stream_gap_freeze_s`."""
         if self.fault is not None or self._thread is None or not self._thread.is_alive():
             return False
         now = self._clock()
-        return all(arm.last_pub is not None and now - arm.last_pub < HEALTHY_MAX_GAP_S for arm in self._arms.values())
+        return all(arm.last_pub is not None and now - arm.last_pub < self._max_gap for arm in self._arms.values())
 
     def leash_engaged(self, side: str) -> bool:
         return self._arms[side].leash
@@ -246,8 +249,17 @@ class Streamer:
         out = np.array(arm.smoother.step(clamped_target, vel), dtype=np.float64)
         if arm.holding:
             arm.still = bool(np.max(np.abs(out - arm.out)) <= _REST_TOL_RAD)
-        arm.out = out
-        cmd = np.asarray(arm.adapter(out), dtype=np.float64)
+        arm.out = out  # the smoother's own state (rest detection, resume), even if clamped below
+        # Backstop: the smoothers land on the margin-clamped target without overshoot, so this should never
+        # fire. If it does, publish the clamped value and leave the smoother alone (no reset).
+        hard = np.clip(out, arm.q_min, arm.q_max)
+        hard_clamped = not np.array_equal(hard, out, equal_nan=True)
+        if hard_clamped:
+            self.hard_clamps += 1
+            if not arm.hard_clamped:
+                logger.error("%s: smoother output %s outside the joint limits; clamped", side, out.tolist())
+        arm.hard_clamped = hard_clamped
+        cmd = np.asarray(arm.adapter(hard), dtype=np.float64)
         if cmd.shape != out.shape or not np.all(np.isfinite(cmd)):
             raise ValueError(f"{side}: invalid command {cmd.tolist()}")
         return cmd
