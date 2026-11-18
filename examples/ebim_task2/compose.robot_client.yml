@@ -9,6 +9,9 @@
 # volume (or override keys with `--set key=value`). Run directories land in ${OUT_DIR:-./robot_runs}
 # (next to this file).
 #
+# ROS_DOMAIN_ID is passed through (default 0, the Munich robot's); it must equal ros.domain_id of the site YAML
+# (the client refuses motion commands otherwise): ROS_DOMAIN_ID=7 docker compose ... run --rm robot-client ...
+#
 # Fast DDS uses the shipped UDP-only profile (/app/robot_client/fastdds_udp_only.xml) by default, like the
 # Munich hosts. Set FASTRTPS_DEFAULT_PROFILES_FILE to another path in the container to replace it, or to
 # the empty string (FASTRTPS_DEFAULT_PROFILES_FILE= docker compose ...) for Fast DDS's built-in transports.
@@ -39,6 +42,7 @@ services:
       - POLICY_SERVER_PORT=${POLICY_SERVER_PORT:-}
       - POLICY_SERVER_API_KEY=${POLICY_SERVER_API_KEY:-}
       - ROBOT_SITE=/config/robot_site.yaml
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
       - FASTRTPS_DEFAULT_PROFILES_FILE=${FASTRTPS_DEFAULT_PROFILES_FILE-/app/robot_client/fastdds_udp_only.xml}
     volumes:
       - ./robot_client/robot_site.munich.yaml:/config/robot_site.yaml:ro
@@ -49,6 +53,7 @@ services:
     profiles: [dev]
     network_mode: host
     environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
       - FASTRTPS_DEFAULT_PROFILES_FILE=/app/robot_client/fastdds_udp_only.xml
     volumes:
       - ./robot_client/robot_site.munich.yaml:/config/robot_site.yaml:ro

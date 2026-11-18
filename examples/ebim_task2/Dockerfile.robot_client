@@ -40,15 +40,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=msgs /opt/franka_ws/install /opt/franka_ws/install
 
-# numpy<2 is openpi-client's own pin (and keeps the apt cv2 importable); pytest matches uv.lock (the
-# apt pytest 6.2.5 in the base has no `pytest` command).
+# Pinned to the versions the client was tested with (a rebuild by the organizers gets the same ones).
+# numpy 1.x is openpi-client's own pin (and keeps the apt cv2 importable); dm-tree comes with openpi-client;
+# pyyaml is the base image's apt python3-yaml (5.4.1). pytest matches uv.lock (the apt pytest 6.2.5 in the
+# base has no `pytest` command).
 COPY packages/openpi-client /tmp/openpi-client
 RUN pip3 install --no-cache-dir \
-        "numpy<2" \
-        pillow \
+        numpy==1.26.4 \
+        pillow==12.3.0 \
         pyyaml \
-        websockets \
-        msgpack \
+        websockets==16.1.1 \
+        msgpack==1.2.4 \
+        dm-tree==0.1.10 \
         ruckig==0.19.4 \
         pytest==8.3.5 \
         /tmp/openpi-client \
