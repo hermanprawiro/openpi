@@ -308,6 +308,24 @@ def test_hold_mid_chunk_drops_queue():
     np.testing.assert_allclose(wps[9], row(chunks[1], 0))  # not chunk 0's row 4
 
 
+def test_step_clamp_reseeded_from_measured_after_hold():
+    chunks = []
+
+    def respond(n):
+        chunks.append(rig.chunk(d=0.08 if n == 0 else 0.0))
+        return 1, chunks[-1], None
+
+    rig = Rig(respond=respond, timeout=0.6)
+    rig.ages = lambda tick: {"cam/head": 1.2} if tick in (5, 6, 7) else {}
+    rig.run()
+
+    wps = dict(rig.streamer.wps("right"))
+    m = rig.measured["right"]
+    np.testing.assert_allclose(wps[4], m + 0.24)  # last waypoint before the HOLD
+    # First waypoint after the HOLD: chunk 1 row 0 (= measured), not clamp_step(m + 0.24, m) = m + 0.14.
+    np.testing.assert_allclose(wps[9], m)
+
+
 def test_server_loss_freezes_then_release():
     rig = Rig(respond=lambda n: (1, None, "connection reset"), timeout=60.0)
     out = rig.run()

@@ -343,6 +343,8 @@ class Runner:
         self.queue = self._new_queue(self.queue)
         self.first_chunk = True
         self.dry_since = None
+        # The arm rests where the streamer braked, not at our last waypoint: re-seed the step clamp from measured.
+        self.prev_wp.clear()
 
     def _handle_results(self, snap: Snapshot) -> None:
         for result in list(self.worker.drain(self.epoch)):
