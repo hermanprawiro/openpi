@@ -188,7 +188,7 @@ class ServerConfig:
     # host / port / api_key are taken from the environment only (never from the YAML).
     host: str = "localhost"
     port: int = 8000
-    api_key: str | None = None
+    api_key: str | None = dataclasses.field(default=None, repr=False)  # never printed
     connect_timeout_s: float = 10.0
     infer_timeout_s: float = 10.0
 
@@ -449,7 +449,9 @@ def _validate_policy(c: _Ctx) -> None:
             "prompt",
             f"must equal the trained prompt {layout.PROMPT!r} (got {prompt!r}); the policy server would refuse it",
         )
-    c.positive("control_hz")
+    hz = c.get("control_hz")
+    if hz is not None and hz != layout.CONTROL_HZ:
+        c.fail("control_hz", f"must equal the trained policy rate {layout.CONTROL_HZ} Hz, got {hz}")
 
 
 def _validate_camera(c: _Ctx) -> None:

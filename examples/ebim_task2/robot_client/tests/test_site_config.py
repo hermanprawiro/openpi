@@ -202,6 +202,19 @@ def test_env_server_and_redaction(load):
     yaml.safe_dump(dumped)  # plain data only
 
 
+def test_api_key_is_not_in_the_server_repr(load):
+    cfg = load(env={"POLICY_SERVER_API_KEY": "s3cret"})
+    assert cfg.server.api_key == "s3cret"
+    assert "s3cret" not in repr(cfg.server)
+    assert "s3cret" not in repr(cfg)
+
+
+def test_control_hz_must_match_the_trained_rate(load):
+    assert load().policy.control_hz == layout.CONTROL_HZ
+    msg = errors_of(load, ["policy.control_hz=10"])
+    assert "policy.control_hz" in msg and "20" in msg
+
+
 def test_server_defaults_without_env(load):
     cfg = load()
     assert (cfg.server.host, cfg.server.port, cfg.server.api_key) == ("localhost", 8000, None)
