@@ -368,9 +368,17 @@ class LeRobotEbimTask2DataConfig(DataConfigFactory):
     # pi0 was pre-trained on delta joint actions, pi0.5 on absolute joint targets. The raw dataset
     # stores absolute targets, so this should be True for pi0 and False for pi0.5.
     use_delta_actions: bool = True
+    # Number of real action dims returned to the client (20 sim layout, 16 Munich real-robot layout).
+    action_dim: int = ebim_task2_policy.ACTION_DIM
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        if self.use_delta_actions and self.action_dim != ebim_task2_policy.ACTION_DIM:
+            raise ValueError(
+                f"use_delta_actions=True needs the {ebim_task2_policy.ACTION_DIM}-dim sim layout delta mask, "
+                f"but action_dim={self.action_dim}."
+            )
+
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform(
@@ -388,7 +396,7 @@ class LeRobotEbimTask2DataConfig(DataConfigFactory):
 
         data_transforms = _transforms.Group(
             inputs=[ebim_task2_policy.EbimTask2Inputs(model_type=model_config.model_type)],
-            outputs=[ebim_task2_policy.EbimTask2Outputs()],
+            outputs=[ebim_task2_policy.EbimTask2Outputs(action_dim=self.action_dim)],
         )
 
         if self.use_delta_actions:
@@ -610,6 +618,25 @@ class TrainConfig:
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
 
+
+# Munich real-robot recipe (16-dim state/action, absolute actions). Shared by the full-FT and LoRA configs.
+_MUNICH_REAL_DATA = LeRobotEbimTask2DataConfig(
+    repo_id="ebim/task2_munich_real",
+    base_config=DataConfig(prompt_from_task=True),
+    # pi0.5 predicts absolute joint targets, which is what the dataset records.
+    use_delta_actions=False,
+    action_dim=16,
+)
+# Literal copy of examples/ebim_task2/robot_client/layout.py:POLICY_METADATA (openpi cannot import from
+# examples/). examples/ebim_task2/robot_client/tests/test_train_config_contract.py guards equality.
+_MUNICH_REAL_METADATA = {
+    "layout": "munich16",
+    "state_dim": 16,
+    "action_dim": 16,
+    "control_hz": 20,
+    "action_horizon": 50,
+    "prompt": "Pick up the thermal pad and place it on the target RAM board",
+}
 
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
@@ -946,6 +973,43 @@ _CONFIGS = [
         batch_size=32,
         num_train_steps=30_000,
         ema_decay=0.99,
+    ),
+    TrainConfig(
+        name="pi05_ebim_task2_munich_real",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+        ),
+        data=_MUNICH_REAL_DATA,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=32,
+        num_train_steps=30_000,
+        ema_decay=0.99,
+        save_interval=5_000,
+        policy_metadata=_MUNICH_REAL_METADATA,
+    ),
+    TrainConfig(
+        name="pi05_lora_ebim_task2_munich_real",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=_MUNICH_REAL_DATA,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=16,
+        num_train_steps=15_000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
+        save_interval=2_500,
+        keep_period=2_500,
+        policy_metadata=_MUNICH_REAL_METADATA,
     ),
     TrainConfig(
         name="pi0_fast_libero",

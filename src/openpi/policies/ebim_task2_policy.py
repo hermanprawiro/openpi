@@ -65,6 +65,9 @@ class EbimTask2Inputs(transforms.DataTransformFn):
 
 @dataclasses.dataclass(frozen=True)
 class EbimTask2Outputs(transforms.DataTransformFn):
+    # Number of real action dims. 20 for the sim layout, 16 for the Munich real-robot layout.
+    action_dim: int = ACTION_DIM
+
     def __call__(self, data: dict) -> dict:
-        # Model actions are padded to the model action dim (32); the first 20 are real.
-        return {"actions": np.asarray(data["actions"][..., :ACTION_DIM])}
+        # Model actions are padded to the model action dim (32); the first `action_dim` are real.
+        return {"actions": np.asarray(data["actions"][..., : self.action_dim])}
