@@ -10,6 +10,7 @@ from robot_client.command import CommandAdapter
 from robot_client.config import load_site_config
 from robot_client.smoother import RateLimiter
 from robot_client.streamer import Streamer
+from robot_client.takeover import RELEASE_TAIL_S
 from robot_client.takeover import Session
 from robot_client.takeover import TakeoverError
 from robot_client.takeover import release
@@ -300,6 +301,29 @@ def test_takeover_order(command_mode):
     assert not any(e[0] == "pub" for e in rig.log[stop:])
     # adapters go back to identity only after publishing stopped
     assert all(rig.log.index(("adapter_deactivate", side)) > stop for side in SIDES)
+
+
+def test_stream_outlives_the_last_deactivation():
+    """The hold keeps streaming for RELEASE_TAIL_S after the last deactivation, so even the arm released last sees
+    commands after its controller went inactive (the stream never ends while a controller may still be active)."""
+    rig = Rig()
+    with rig.session():
+        pass
+    last_deactivate = max(rig.index(is_switch(side, "deactivate")) for side in SIDES)
+    stop = rig.log.index(("stop",))
+    for side in SIDES:
+        tail = rig.pubs(side, rig.log[last_deactivate:stop])
+        assert len(tail) >= round(RELEASE_TAIL_S * 100) - 1, f"{side}: {len(tail)} commands after the deactivation"
+    assert RELEASE_TAIL_S in rig.time.sleeps
+
+    # nothing was activated by us (already active): no deactivation, no tail
+    rig = Rig()
+    for cm in rig.cms.values():
+        cm.states[CTRL] = "active"
+    with rig.session():
+        pass
+    assert not rig.switches(kind="deactivate")
+    assert RELEASE_TAIL_S not in rig.time.sleeps
 
 
 def test_tolerance_rechecked_immediately_before_activation():

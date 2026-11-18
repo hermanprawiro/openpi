@@ -807,6 +807,7 @@ class _RunCommand:
     def _dry_episode(self, idx: int) -> str:
         print(f"\n=== dry-run episode {idx} (nothing moves; preview topics only) ===", flush=True)
         self._ensure_worker()
+        self._wait_discovery()
         adapters = make_adapters(self.cfg, self.sides)
         streamer = make_streamer(self.cfg, self.node, self.sides, adapters)
         hold = self._measured_hold()
@@ -824,6 +825,13 @@ class _RunCommand:
         finally:
             streamer.stop()
         return self._conclude(idx, result, streamer)
+
+    def _wait_discovery(self) -> None:
+        """As a Session does before a live episode: let `takeover.discovery_wait_s` pass since the node started, so
+        the start gate does not read a camera whose first frame is still on its way as a dead stream."""
+        wait = self.cfg.takeover.discovery_wait_s - self.node.uptime_s()
+        if wait > 0:
+            time.sleep(wait)
 
     def _wait_first_hold(self, streamer: Streamer) -> None:
         """Until every side has published its first hold command: the start gate reads "not published yet" as a

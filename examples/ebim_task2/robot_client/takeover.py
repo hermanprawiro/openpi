@@ -11,8 +11,8 @@ controller with their own tooling while we stream hold.
 Release (`release`): hold the arm, wait, deactivate only what we activated. It never raises; errors are collected.
 `Session` ties it together: wait for discovery and check every command topic for foreign messages before
 publishing anything, start the stream with hold = measured, take over every side, and on exit (or any exception,
-including KeyboardInterrupt, also during `__enter__`) release every side it took over, then stop the stream exactly
-once and re-raise the original exception.
+including KeyboardInterrupt, also during `__enter__`) release every side it took over, keep streaming the hold for
+RELEASE_TAIL_S if it deactivated anything, then stop the stream exactly once and re-raise the original exception.
 
 Pure logic against protocols; the ROS implementations come with the node (Task 16).
 """
@@ -38,6 +38,9 @@ EXTERNAL_WAIT_S = 60.0  # takeover.mode external: how long to wait for the opera
 WARM_POLL_S = 0.01
 CONFIRM_POLL_S = 0.05
 EXTERNAL_POLL_S = 0.1
+# After the last deactivation the hold keeps streaming this long before the stream stops, so a controller never sees
+# the stream end while it might still be active (the switch reply can race the next command otherwise).
+RELEASE_TAIL_S = 0.1
 _EPS = 1e-9
 
 
@@ -508,6 +511,11 @@ class Session:
                 errs, intr = [f"{side}: release failed: {type(e).__name__}: {e}"], isinstance(e, KeyboardInterrupt)
             errors += errs
             interrupted |= intr
+        if any(self.activated_by_us.values()):
+            try:
+                self.sleep(RELEASE_TAIL_S)
+            except KeyboardInterrupt:
+                interrupted = True
         try:
             self.streamer.stop()
         except BaseException as e:

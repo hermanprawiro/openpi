@@ -499,6 +499,38 @@ def test_dry_run_start_gate_waits_for_the_first_hold_command(tmp_path, monkeypat
     assert _Runner.generations == [1]
 
 
+def test_dry_run_waits_for_discovery_before_judging_the_streams(tmp_path, monkeypatch, stub_server):
+    """Like a Session, a dry run gives DDS discovery `takeover.discovery_wait_s` from the node's start before the start
+    gate judges the streams: a camera whose first frame has not arrived yet is not a dead one (it used to end the
+    episode 'FREEZE before the start: cam/head never seen' when the node had only just started)."""
+    server = stub_server(layout_id="munich16", latency_s=0.01)
+    world = World(monkeypatch, ScriptedConsole(lines=["f"], keys=[ENTER]))
+    _Runner.generations = []
+    monkeypatch.setattr(cli, "Runner", _Runner)
+    make_node = world._make_node  # noqa: SLF001
+
+    def fresh_node(cfg, command_mode):
+        node = make_node(cfg, command_mode)
+        t0 = time.monotonic()
+        node.uptime_s = lambda: time.monotonic() - t0
+        snapshot = node.snapshot
+
+        def head_after_discovery():
+            snap = snapshot()
+            if node.uptime_s() < 0.2:  # the head camera's first frame arrives 0.2 s after the node started
+                snap.ages["cam/head"] = float("inf")
+                del snap.images["head"]
+            return snap
+
+        node.snapshot = head_after_discovery
+        return node
+
+    monkeypatch.setattr(cli, "make_node", fresh_node)
+    args = base_args(tmp_path, "takeover.discovery_wait_s=0.4")
+    assert cli.main(["run", *args, "--dry-run", "--episodes", "1"], env=server_env(server.port)) == 0
+    assert _Runner.generations == [1]
+
+
 def test_second_sigint_does_not_abort_release(tmp_path, monkeypatch, capfd, stub_server):
     server = stub_server(layout_id="munich16", latency_s=0.01)
 
