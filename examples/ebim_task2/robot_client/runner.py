@@ -11,6 +11,9 @@ sent before are discarded) and, when RUN returns, replan; the first chunk after 
 must start within `max_start_offset_rad` of the measured pose (else FREEZE). FREEZE ends the episode; the
 caller (Session) releases the controllers. Every ending holds the streamer.
 
+Requests and the async latency skip use a policy step that advances every tick except, in async mode, while
+the leash holds back consumption (plan time is frozen then, so a late chunk aligns with the queue front).
+
 The loop runs on a deadline grid of `1 / policy.control_hz`; a tick that finishes more than one period
 late re-anchors the grid (`next = now + period`, counted in `overruns`): no catch-up ticks.
 """
@@ -206,7 +209,10 @@ class Runner:
     def _begin(self, generation: int) -> None:
         self.epoch = generation * _EPOCH_STRIDE
         self.queue = self._new_queue()
-        self.step = 0
+        self.step = 0  # completed ticks
+        # Policy time: request obs_step / latency skip. Advances every tick, except (async) while the leash holds
+        # back consumption, so a chunk arriving after a leash stays aligned with the queue front.
+        self.plan_step = 0
         self.paused = False
         self.holding = False  # streamer.hold() issued for the current HOLD / pause
         self.first_chunk = True  # next chunk gets the start-offset check
@@ -297,6 +303,7 @@ class Runner:
 
         self._handle_results(snap)
         obs = action = None
+        plan_frozen = False
         if self.paused:
             status = "paused"
             self.counts["pause_steps"] += 1
@@ -309,6 +316,7 @@ class Runner:
             if any(self.streamer.leash_engaged(side) for side in self.active):
                 status = "leash"
                 self.counts["leash_steps"] += 1
+                plan_frozen = self.cfg.inference.mode == "async"
             else:
                 action = self.queue.pop()
                 if action is None:
@@ -323,6 +331,8 @@ class Runner:
         self._gripper_keepalive(now)
         reason = "operator pause" if self.paused else (why if mode is not safety.Mode.RUN else None)
         self._record(now - t0, status, reason, dry_s, snap, action, obs)
+        if not plan_frozen:
+            self.plan_step += 1
 
     def _enter_hold(self, why: str) -> None:
         logger.warning("runner: HOLD (%s)", why)
@@ -348,10 +358,11 @@ class Runner:
             self.counts["chunks"] += 1
             self.infer_ms.append(result.infer_ms)
             t_request = self.t_request.pop(result.obs_step, math.nan)
-            self.recorder.chunk(result.obs_step, t_request, self.clock(), self.step - result.obs_step, chunk)
+            latency = self.plan_step - result.obs_step
+            self.recorder.chunk(result.obs_step, t_request, self.clock(), latency, chunk)
             if self.first_chunk:
                 self._check_start(chunk, snap)
-            self.queue.on_chunk(result.obs_step, chunk, self.step, first=self.first_chunk)
+            self.queue.on_chunk(result.obs_step, chunk, self.plan_step, first=self.first_chunk)
             self.first_chunk = False
 
     def _check_start(self, chunk: np.ndarray, snap: Snapshot) -> None:
@@ -370,9 +381,9 @@ class Runner:
             obs = build_observation(snap, self.cfg.cameras, self.cfg.policy.prompt, pin=self.cfg.state.pin)
         except ValueError as e:  # StateError, missing image, bad crop
             raise _End("freeze", f"cannot build the observation: {e}") from e
-        self.worker.submit(self.epoch, self.step, obs)
+        self.worker.submit(self.epoch, self.plan_step, obs)
         self.queue.on_request_sent()
-        self.t_request[self.step] = self.clock()
+        self.t_request[self.plan_step] = self.clock()
         self.counts["requests"] += 1
         return obs
 
@@ -409,6 +420,7 @@ class Runner:
         self.recorder.step(
             {
                 "step": self.step,
+                "plan_step": self.plan_step,
                 "t": round(t, 4),
                 "mode": status,
                 "reason": why,

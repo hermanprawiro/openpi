@@ -459,6 +459,30 @@ def test_leash_pauses_consumption():
     assert len(rig.worker.requests) == 1
 
 
+def test_async_leash_freezes_plan_time():
+    chunks = []
+
+    def respond(n):
+        chunks.append(rig.chunk(tag=0.05 * n, d=0.001))
+        return (2 if n == 0 else 6), chunks[-1], None
+
+    rig = Rig(["inference.mode=async"], respond=respond, timeout=1.5)
+    rig.streamer.leash_fn = lambda tick, side: side == "right" and 19 <= tick < 22
+    out = rig.run()
+
+    # Request at tick 17 (15 actions left) is answered at tick 23. Real progress since: ticks 17, 18, 22 -> skip 3,
+    # not 6 (the three leash ticks do not count).
+    assert rig.worker.requests[1].obs_step == 17
+    assert rig.recorder.chunks[1][3] == 3
+    wps = dict(rig.streamer.wps("right"))
+    assert not any(t in wps for t in (19, 20, 21))
+    a, b = chunks
+    np.testing.assert_allclose(wps[22], row(a, 17))  # resumes with the next unconsumed row
+    np.testing.assert_allclose(wps[23], 0.7 * row(a, 18) + 0.3 * row(b, 3))  # queue front aligned with fresh row 3
+    assert out.stats["leash_steps"] == 3
+    assert out.stats["stale_steps_skipped"] == 3
+
+
 def test_unhealthy_streamer_freezes():
     rig = Rig(timeout=60.0)
     rig.streamer.healthy_fn = lambda tick: tick < 10
