@@ -751,3 +751,36 @@ def test_start_gate_discards_pending_keys_before_prompting(tmp_path, monkeypatch
     World(monkeypatch, console)
     assert cli.main(["run", *base_args(tmp_path)], env=server_env(server.port)) == 0
     assert console.discards == 1
+
+
+def test_dry_run_streamer_follows_its_own_output_not_the_static_robot():
+    """A dry run's preview never moves the robot, so judging the leash against the real measured joints would stall
+    the preview after max_track_lag_rad; the preview streamer's `measured` is its own last output."""
+    cfg = load_site_config(MUNICH_YAML, ["smoother.impl=clamp"], {})
+    node = FakeNode(cfg, "preview", world=None)  # measured stays at the start pose
+    sides = ("left", "right")
+    adapters = cli.make_adapters(cfg, sides)
+    streamer = cli.make_streamer(cfg, node, sides, adapters, preview=True)
+    start = {side: node.measured(side) for side in sides}
+    streamer.start(start, thread=False)
+    target = start["right"].copy()
+    target[0] += 0.8  # beyond max_track_lag_rad (0.5) from the static measured pose
+    t = 0.0
+    for k in range(1, 401):
+        if k % 5 == 1:
+            wp = start["right"] + (target - start["right"]) * min(1.0, k / 200)
+            streamer.set_waypoint("right", wp)
+        t += 0.01
+        out = streamer.step(t)
+    assert streamer.leash_events == 0
+    assert out["right"][0] - start["right"][0] > 0.7
+
+    live = cli.make_streamer(cfg, node, sides, adapters)  # a live streamer still judges the real arm
+    live.start(start, thread=False)
+    t = 0.0
+    for k in range(1, 401):
+        if k % 5 == 1:
+            live.set_waypoint("right", start["right"] + (target - start["right"]) * min(1.0, k / 200))
+        t += 0.01
+        live.step(t)
+    assert live.leash_events > 0

@@ -126,13 +126,27 @@ def make_console() -> "Console":
     return Console()
 
 
-def make_streamer(cfg: SiteConfig, node, sides: Sequence[str], adapters: Mapping[str, CommandAdapter]) -> Streamer:
-    """A fresh streamer for one Session / episode (`start()` works once and faults are sticky)."""
+def make_streamer(
+    cfg: SiteConfig,
+    node,
+    sides: Sequence[str],
+    adapters: Mapping[str, CommandAdapter],
+    *,
+    preview: bool = False,
+) -> Streamer:
+    """A fresh streamer for one Session / episode (`start()` works once and faults are sticky). `preview` (dry run):
+    the robot does not follow the preview, so the tracking leash judges the streamer's own last output instead of
+    the real measured joints (else the preview would stall after max_track_lag_rad)."""
     limits = {side: tuple(np.asarray(x, dtype=np.float64) for x in cfg.safety.joint_limits[side]) for side in sides}
-    return Streamer(
+    streamer: Streamer | None = None
+
+    def own_output(side: str) -> np.ndarray:
+        return streamer.last_command(side)  # adapters are identity in a dry run (never activated)
+
+    streamer = Streamer(
         sides,
         publish=node.publish_arm,
-        measured=node.measured,
+        measured=own_output if preview else node.measured,
         smoother_factory=lambda: make_smoother(cfg.smoother, dt=1.0 / cfg.stream_hz),
         adapters={side: adapters[side] for side in sides},
         limits=limits,
@@ -140,6 +154,7 @@ def make_streamer(cfg: SiteConfig, node, sides: Sequence[str], adapters: Mapping
         hz=cfg.stream_hz,
         waypoint_dt=1.0 / cfg.policy.control_hz,
     )
+    return streamer  # noqa: RET504 - own_output() reads the name
 
 
 def make_adapters(cfg: SiteConfig, sides: Sequence[str]) -> dict[str, CommandAdapter]:
@@ -490,7 +505,11 @@ def _ros_env_ok(ctx: Context, *, refuse: bool) -> bool:
     problems = check_ros_env(ctx.cfg, ctx.env)
     for problem in problems:
         label = "REFUSED" if refuse else "WARNING"
-        print(f"{label}: {problem}; set the environment variable or the ros section of the site YAML", file=sys.stderr)
+        print(
+            f"{label}: {problem}; set the environment variable (the compose file passes ROS_DOMAIN_ID through: "
+            "ROS_DOMAIN_ID=<n> docker compose ... run --rm robot-client ...) or the ros section of the site YAML",
+            file=sys.stderr,
+        )
     return not problems
 
 
@@ -853,7 +872,7 @@ class _RunCommand:
         self._ensure_worker()
         self._wait_discovery()
         adapters = make_adapters(self.cfg, self.sides)
-        streamer = make_streamer(self.cfg, self.node, self.sides, adapters)
+        streamer = make_streamer(self.cfg, self.node, self.sides, adapters, preview=True)
         hold = self._measured_hold()
         try:
             streamer.start(hold)
