@@ -20,13 +20,10 @@ from eval_client.constants import ACTION_DIM
 from eval_client.constants import ARM_ACTION_DIMS
 from eval_client.constants import BLEND_ACTION_DIMS
 
-_ARM = np.asarray(ARM_ACTION_DIMS)
-_BLEND = np.asarray(BLEND_ACTION_DIMS)
 
-
-def _validate_chunk(chunk) -> np.ndarray:
+def _validate_chunk(chunk, action_dim: int) -> np.ndarray:
     chunk = np.asarray(chunk)
-    if chunk.ndim != 2 or chunk.shape[1] < ACTION_DIM:
+    if chunk.ndim != 2 or chunk.shape[1] < action_dim:
         raise ValueError(f"Bad action chunk shape: {chunk.shape}")
     return chunk
 
@@ -34,8 +31,9 @@ def _validate_chunk(chunk) -> np.ndarray:
 class ChunkExecutor:
     """Sync mode: execute the first replan_steps of each chunk."""
 
-    def __init__(self, replan_steps: int):
+    def __init__(self, replan_steps: int, *, action_dim: int = ACTION_DIM):
         self.replan_steps = replan_steps
+        self.action_dim = action_dim
         self._queue = deque()
 
     @property
@@ -43,17 +41,18 @@ class ChunkExecutor:
         return not self._queue
 
     def load(self, chunk) -> None:
-        chunk = _validate_chunk(chunk)
-        self._queue.extend(chunk[: self.replan_steps, :ACTION_DIM])
+        chunk = _validate_chunk(chunk, self.action_dim)
+        self._queue.extend(chunk[: self.replan_steps, : self.action_dim])
 
     def next_action(self) -> np.ndarray:
         return self._queue.popleft()
 
 
 # Merge strategies share one signature: merge(queue, fresh, last_action,
-# blend_steps). `fresh` is the usable (non-stale) slice of the new chunk,
+# blend_steps, blend_idx). `fresh` is the usable (non-stale) slice of the new chunk,
 # step-aligned with queue[0]; `last_action` is the last published action
-# (None before the first chunk) and `blend_steps` the hand-off window.
+# (None before the first chunk), `blend_steps` the hand-off window and
+# `blend_idx` the array of dims that may be interpolated.
 
 
 def _queue_array(queue: deque, like: np.ndarray) -> np.ndarray:
@@ -62,15 +61,15 @@ def _queue_array(queue: deque, like: np.ndarray) -> np.ndarray:
     return np.asarray(list(queue), dtype=like.dtype).reshape(-1, like.shape[1])
 
 
-def _mix(old: np.ndarray, new: np.ndarray, w_old, w_new) -> np.ndarray:
+def _mix(old: np.ndarray, new: np.ndarray, w_old, w_new, blend_idx: np.ndarray) -> np.ndarray:
     """Rows of `new` whose blend dims are replaced by w_old*old + w_new*new.
     Weights are scalars or (rows, 1) columns, so they may vary per row."""
     out = new.copy()
-    out[:, _BLEND] = w_old * old[:, _BLEND] + w_new * new[:, _BLEND]
+    out[:, blend_idx] = w_old * old[:, blend_idx] + w_new * new[:, blend_idx]
     return out
 
 
-def _merge_replace(queue: deque, fresh: np.ndarray, last_action, blend_steps: int) -> None:
+def _merge_replace(queue: deque, fresh: np.ndarray, last_action, blend_steps: int, blend_idx: np.ndarray) -> None:
     queue.clear()
     queue.extend(fresh)
 
@@ -81,17 +80,17 @@ def _make_blend(old_weight: float, new_weight: float):
     further (a short fresh chunk never shortens the plan). Follows
     LeRobot's aggregate_fn idea."""
 
-    def merge(queue: deque, fresh: np.ndarray, last_action, blend_steps: int) -> None:
+    def merge(queue: deque, fresh: np.ndarray, last_action, blend_steps: int, blend_idx: np.ndarray) -> None:
         old = _queue_array(queue, fresh)
         queue.clear()
         overlap = min(len(old), len(fresh))
-        queue.extend(_mix(old[:overlap], fresh[:overlap], old_weight, new_weight))
+        queue.extend(_mix(old[:overlap], fresh[:overlap], old_weight, new_weight, blend_idx))
         queue.extend(old[overlap:] if len(old) > overlap else fresh[overlap:])
 
     return merge
 
 
-def _merge_crossfade(queue: deque, fresh: np.ndarray, last_action, blend_steps: int) -> None:
+def _merge_crossfade(queue: deque, fresh: np.ndarray, last_action, blend_steps: int, blend_idx: np.ndarray) -> None:
     """Ramp from the old plan into the fresh one over B = min(blend_steps,
     overlap) rows with alpha_t = (t + 1) / (B + 1), pure fresh afterwards;
     tail rule as blend_*. Continuous at both ends of the window, unlike a
@@ -102,12 +101,12 @@ def _merge_crossfade(queue: deque, fresh: np.ndarray, last_action, blend_steps: 
     overlap = min(len(old), len(fresh))
     window = min(blend_steps, overlap)
     alpha = ((np.arange(window) + 1) / (window + 1))[:, None]
-    queue.extend(_mix(old[:window], fresh[:window], 1.0 - alpha, alpha))
+    queue.extend(_mix(old[:window], fresh[:window], 1.0 - alpha, alpha, blend_idx))
     queue.extend(fresh[window:overlap])
     queue.extend(old[overlap:] if len(old) > overlap else fresh[overlap:])
 
 
-def _merge_offset_decay(queue: deque, fresh: np.ndarray, last_action, blend_steps: int) -> None:
+def _merge_offset_decay(queue: deque, fresh: np.ndarray, last_action, blend_steps: int, blend_idx: np.ndarray) -> None:
     """Adopt the fresh plan wholesale (replace's reactivity) but shift it so
     its first row matches what would have been published next -- queue[0],
     or the held last action when the queue is dry -- and bleed that shift
@@ -119,9 +118,9 @@ def _merge_offset_decay(queue: deque, fresh: np.ndarray, last_action, blend_step
     out = fresh.copy()
     if anchor is not None:
         decay_len = min(blend_steps, len(fresh))
-        delta = np.asarray(anchor)[_BLEND] - fresh[0, _BLEND]
+        delta = np.asarray(anchor)[blend_idx] - fresh[0, blend_idx]
         weights = ((decay_len - np.arange(decay_len)) / decay_len)[:, None]
-        out[:decay_len, _BLEND] += weights * delta
+        out[:decay_len, blend_idx] += weights * delta
     queue.extend(out)
 
 
@@ -145,7 +144,17 @@ class AsyncChunkBuffer:
     """Main-thread bookkeeping for async inference (no locks: only the
     control loop touches it; worker traffic arrives via queue.Queue)."""
 
-    def __init__(self, execute_horizon: int, trigger_threshold: float, merge: str = "replace", blend_steps: int = 10):
+    def __init__(
+        self,
+        execute_horizon: int,
+        trigger_threshold: float,
+        merge: str = "replace",
+        blend_steps: int = 10,
+        *,
+        action_dim: int = ACTION_DIM,
+        arm_dims: tuple[int, ...] = ARM_ACTION_DIMS,
+        blend_dims: tuple[int, ...] = BLEND_ACTION_DIMS,
+    ):
         if execute_horizon < 1:
             raise ValueError(f"execute_horizon must be >= 1, got {execute_horizon}")
         if not 0.0 <= trigger_threshold < 1.0:
@@ -155,6 +164,9 @@ class AsyncChunkBuffer:
         if blend_steps < 1:
             raise ValueError(f"blend_steps must be >= 1, got {blend_steps}")
         self.execute_horizon = execute_horizon
+        self.action_dim = action_dim
+        self._arm = np.asarray(arm_dims)
+        self._blend = np.asarray(blend_dims)
         self.blend_steps = blend_steps
         # Request a fresh chunk while this many actions remain; >= 1 so
         # threshold 0.0 still requests one step before running dry.
@@ -186,18 +198,18 @@ class AsyncChunkBuffer:
         self.in_flight = True
 
     def on_chunk(self, obs_step: int, chunk, next_step: int) -> None:
-        chunk = _validate_chunk(chunk)
+        chunk = _validate_chunk(chunk, self.action_dim)
         self.in_flight = False
         skip = next_step - obs_step
         self.latency_steps.append(skip)
-        usable = chunk[skip : skip + self.execute_horizon, :ACTION_DIM]
+        usable = chunk[skip : skip + self.execute_horizon, : self.action_dim]
         if len(usable) == 0:
             # Whole chunk predates next_step (very late arrival);
             # should_request() re-fires on the next step.
             self.chunks_dropped += 1
             return
         self.stale_skipped += skip
-        self._merge(self._queue, usable, self.last_action, self.blend_steps)
+        self._merge(self._queue, usable, self.last_action, self.blend_steps, self._blend)
         self._pending_switch = True
 
     def pop(self):
@@ -207,7 +219,7 @@ class AsyncChunkBuffer:
             self.depth_at_pop.append(len(self._queue))
             action = self._queue.popleft()
             if self.last_action is not None:
-                jump = float(np.max(np.abs(action[_ARM] - self.last_action[_ARM])))
+                jump = float(np.max(np.abs(action[self._arm] - self.last_action[self._arm])))
                 self.step_jumps.append(jump)
                 if self._pending_switch:
                     self.switch_jumps.append(jump)

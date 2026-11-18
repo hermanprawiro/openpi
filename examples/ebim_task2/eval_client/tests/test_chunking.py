@@ -269,3 +269,30 @@ class TestAsyncChunkBuffer:
         assert stats["switch_jump_mean"] is None
         assert stats["step_jump_max"] is None
         assert stats["step_jump_mean"] is None
+
+
+# Munich real-robot layout: 16 dims, grippers at 7 and 15, arm joints elsewhere.
+ARM16 = (*range(7), *range(8, 15))
+
+
+def test_munich16_blend_leaves_grippers_fresh():
+    buf = chunking.AsyncChunkBuffer(30, 0.5, "blend_favor_old", action_dim=16, arm_dims=ARM16, blend_dims=ARM16)
+    buf.on_chunk(0, np.zeros((50, 16)), 0)
+    fresh = np.ones((50, 16))
+    buf.on_chunk(0, fresh, 0)
+    row = buf.pop()
+    assert row[7] == 1.0  # grippers take fresh
+    assert row[15] == 1.0
+    assert row[0] == pytest.approx(0.3)  # 0.7*old + 0.3*new
+    assert row.shape == (16,)
+
+
+def test_executor_16_dims():
+    ex = chunking.ChunkExecutor(30, action_dim=16)
+    ex.load(np.zeros((50, 32)))
+    assert ex.next_action().shape == (16,)
+
+
+def test_validate_chunk_rejects_narrow_chunk_for_action_dim():
+    with pytest.raises(ValueError, match="Bad action chunk shape"):
+        chunking.ChunkExecutor(30, action_dim=16).load(np.zeros((50, 15)))
