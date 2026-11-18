@@ -32,13 +32,13 @@ The person who starts the policy server on the GPU machine should read [SERVER.m
    messages.
 3. On each arm's controller manager (`/left/controller_manager`, `/right/controller_manager`) the controller
    `joint_impedance_controller` is loaded and configured (state `inactive`). The client activates it and deactivates it
-   again at the end. If your tooling must do the activation instead, see
+   again at the end. (If the controller is already `active` when the client starts, or you use `takeover.mode: external`, the client does **not** deactivate it at the end: you must.) If your tooling must do the activation instead, see
    [question 7](#7-site-facts-we-could-not-confirm-and-how-to-settle-them-on-site).
 4. The thermal pad and the target RAM board are on the table, as in the data collection.
 5. The laptop is on the same network and ROS domain as the robot (`ROS_DOMAIN_ID=0`, Humble, Fast DDS), and can reach the
    machine that runs the policy server on TCP port 8000 (or the port you chose).
 6. The laptop has Docker with the `docker compose` plugin and a keyboard in an interactive terminal. The client needs a
-   real terminal (it reads single key presses).
+   real terminal (it reads single key presses only while the policy runs and at the start gate; every other prompt needs the answer typed, then Enter).
 
 ## 3. Quick reference
 
@@ -51,19 +51,21 @@ check-obs  ->  check-infer  ->  check-motion --arm right  ->  check-motion --arm
 
 **Keys**
 
+**Type the letter, then press Enter** at every prompt that shows a list of answers in brackets: the `Reset the scene...`, `Workspace clear...`, `Outcome?` and `Note` prompts, including `q`, `k`, `s`, `f`, `x`. Only two places react to a single key press, without Enter: `Press Enter to start the policy` (Enter or `q`) and the running policy (`p`, Enter, `q`).
+
 | Where | Key | Effect |
 |---|---|---|
 | Any prompt that says `[Enter] ... / [q] quit` | Enter | Continue (moves the robot when the prompt says so) |
-| | `q` | Quit without moving |
+| | `q` then Enter | Quit without moving |
 | `Reset the scene...` prompt before an episode | Enter | Move both arms to the start pose (PTP), spine to its height, open grippers |
-| | `k` | Keep the current pose (skip the move) |
-| `Press Enter to start the policy` | Enter | Start the policy |
-| | `q` | Release the controllers and quit |
-| While the policy runs | `p` | Pause: the arms hold still |
+| | `k` then Enter | Keep the current pose (skip the move) |
+| `Press Enter to start the policy` | Enter (single key) | Start the policy |
+| | `q` (single key) | Release the controllers and quit |
+| While the policy runs (single keys) | `p` | Pause: the arms hold still |
 | | Enter | Resume after a pause |
 | | `q` | End the episode (the arms hold, then the controllers are released) |
 | | Ctrl-C | Emergency release: the client stops and releases what it activated |
-| `Outcome?` prompt | `s` / `f` / `x` | Success / fail / skip, then an optional one-line note |
+| `Outcome?` prompt | `s` / `f` / `x`, then Enter | Success / fail / skip. Then an optional one-line note (type it, Enter; or just Enter) |
 
 Keys you typed before a prompt appeared are thrown away, so an early Enter cannot start anything.
 Pressing Ctrl-C twice does nothing extra: after the first one the client finishes its release
@@ -299,7 +301,8 @@ Without `--episodes` the run continues episode after episode until you answer `q
 3. `Press Enter to start the policy (q to release and quit)`. Press Enter when you are ready, hand on the E-stop.
 4. `Policy running: p pause, Enter resume, q end the episode, Ctrl-C emergency release.`
 5. The episode ends (120 s timeout, `q`, or `FREEZE`). The client holds the arms for 0.5 s, deactivates the controllers
-   (`Released.`), then asks `Outcome? [s]uccess / [f]ail / [x] skip:` and an optional note. Be honest: this is our only
+   it activated (`Released.`; **a controller that was already active, or any controller with `takeover.mode: external`, stays
+   active and the command stream stops about a second later: deactivate it at once, see section 11 and question 7**), then asks `Outcome? [s]uccess / [f]ail / [x] skip:` and an optional note. Be honest: this is our only
    label. `x` means "not a valid attempt" (for example you pressed `q` immediately).
 6. Reset the scene by hand; the next episode starts at step 1.
 
@@ -319,7 +322,7 @@ The settings you are most likely to touch. All are keys of `robot_site.munich.ya
 |---|---|---|
 | `command_mode` | `absolute` | `absolute`: the command topic carries target joint angles. `relative_to_activation`: targets relative to the pose at activation (see question 1) |
 | `joint_signs.<side>` | all `1` | Per-joint direction flip, only used in `relative_to_activation` mode |
-| `takeover.mode` | `switch` | `switch`: the client activates/deactivates the controller. `external`: you do it with your own tooling (see question 7) |
+| `takeover.mode` | `switch` | `switch`: the client activates/deactivates the controller. `external`: you do it with your own tooling and must deactivate it yourself at the end of every episode (see question 7) |
 | `takeover.hold_inactive_arms` | `true` | With `--arms right`, still take over the left arm and hold it |
 | `takeover.tol_rad` | `0.02` | How far the streamed hold may differ from the measured pose at activation |
 | `takeover.service_timeout_s` | `5.0` | Timeout of each controller_manager service call |
@@ -555,7 +558,7 @@ All of these appear as `REFUSED: takeover refused: <side>: ...` (exit 2) in `run
 | `list_controllers on <controller_manager> failed: ...` (for a timeout the end reads `service /right/controller_manager/list_controllers not available within 5 s; is the controller_manager running?`) | The controller_manager service did not answer within `takeover.service_timeout_s` | Question 7. Check `arms.<side>.controller_manager` (the namespace) and the DDS settings |
 | `controller '<name>' is not loaded on <controller_manager> (available: ...). Load and configure it with your tooling, fix arms.<side>.controller, or set takeover.mode: external.` | The controller does not exist on that manager. `available:` lists what does | Use the right name in `arms.<side>.controller`, or have the robot side load it |
 | `controller '<name>' is '<state>' on <cm>; it must be 'inactive' to be activated. Load and configure it with your tooling (e.g. ros2 control set_controller_state <controller> inactive -c <cm>), or set takeover.mode: external.` | The controller is loaded but not configured (state `unconfigured`) or in another state | Configure it with your tooling so that it is `inactive`, then retry |
-| log: `<side>: <controller> is already active (not activated by us); streaming to it and leaving it active on release` (also `<side>: <controller> is already active; streaming to it` with `takeover.mode: external`) | The controller was already active when we arrived | We stream to it and leave it active at the end; deactivate it yourself afterwards if you want |
+| log: `<side>: <controller> is already active (not activated by us); streaming to it and leaving it active on release` (also `<side>: <controller> is already active; streaming to it` with `takeover.mode: external`) | The controller was already active when we arrived, so we do not deactivate it | At the end of the episode the command stream stops about a second after `Released.` while this controller stays active with nobody commanding it. **Deactivate it at once** (your tooling, or `release --arm ...`, section 11) |
 | `the streamed hold differs from the measured joints by ... rad <when> (> takeover.tol_rad 0.02); the arm moved since the stream started. Let it settle and retry.` | At activation the arm must stand still at the pose we stream. It did not (somebody pushed it, it is vibrating, or a settling motion after `prepare`) | Wait a few seconds and retry. If it repeats on a still arm, raise `takeover.tol_rad` a little (not above about 0.05) and tell us |
 | `the command stream is unhealthy (...); not activating` / `the command stream faulted while warming up: ...` / `only N/20 hold commands published after ... s; the command stream is not running` / `the command stream is unhealthy after takeover (...)` | Our own 100 Hz publisher is broken or too slow | Section 9; send the transcript |
 | `switch_controller (activate <controller>) on <cm> failed: ...` / `switch_controller refused to activate <controller> on <cm>` | The controller manager rejected or did not answer the activation | Question 7 (`takeover.mode: external`); look at the robot side for why |
@@ -605,10 +608,10 @@ Other lines during a run:
 
 | Message | Meaning | What to do |
 |---|---|---|
-| `Released.` | The controllers the client activated are deactivated and the stream stopped | Nothing |
+| `Released.` | The controllers **the client activated** are deactivated and the stream stopped. A controller that was already active when the episode started, or any controller with `takeover.mode: external`, is **still active**, and the stream stops within about a second | Nothing if you let the client activate the controllers. Otherwise deactivate them at once with your tooling or `release` (section 11) |
 | `releasing — wait, or use the E-stop` | You sent another interrupt during a release | Wait a few seconds. Use the E-stop if the arm is doing something wrong |
 | `Interrupted. Everything this client activated has been released (see above).` | After Ctrl-C (exit 130) | Nothing. If `release:` lines appeared above, see below |
-| `release: <side>: switch_controller refused to deactivate <controller> on <cm>` / `<controller> still active after deactivation (state: ...)` / `deactivating <controller> on <cm> failed: ...` / `deactivating <controller> interrupted (KeyboardInterrupt); retrying` / `hold interrupted (KeyboardInterrupt); continuing the release` / `hold failed: ...` / `stopping the command stream failed: ...` / `resetting the command adapter failed: ...` | **The controller may still be active.** The client stops publishing shortly after this | **Run `$RC release --arm left --arm right` immediately**, or deactivate with your own tooling, or use the E-stop |
+| `release: <side>: switch_controller refused to deactivate <controller> on <cm>` / `<controller> still active after deactivation (state: ...)` / `deactivating <controller> on <cm> failed: ...` / `deactivating <controller> interrupted (KeyboardInterrupt); retrying` / `hold interrupted (KeyboardInterrupt); continuing the release` / `hold failed: ...` / `stopping the command stream failed: ...` / `resetting the command adapter failed: ...` | **The controller may still be active.** The client stops publishing shortly after this | **Run `docker compose -f examples/ebim_task2/compose.robot_client.yml run --rm robot-client release --arm left --arm right` immediately** (from the openpi root), or deactivate with your own tooling, or use the E-stop |
 | `REFUSED: release failed for [...] (see above); use the robot's own tooling or the E-stop` and the lines `<side>: cannot read the state of <controller> on <cm>: ...`, `<side>: deactivating <controller> on <cm> failed: ...`, `<side>: switch_controller did not deactivate ... (state: ...)` | The `release` command could not deactivate | Use the robot's own tooling or the E-stop |
 | `<side>: <controller> on <cm> is <state>; nothing to deactivate` / `<side>: ... deactivated (now ...)` | The `release` command's normal output | Nothing |
 
@@ -616,7 +619,7 @@ Other lines during a run:
 
 | Message | Meaning | What to do |
 |---|---|---|
-| A Python traceback (exit code 1) | A bug in the client, not designed behavior | If an arm may be active, run `$RC release --arm left --arm right`. Send us the transcript |
+| A Python traceback (exit code 1) | A bug in the client, not designed behavior | If an arm may be active, run `docker compose -f examples/ebim_task2/compose.robot_client.yml run --rm robot-client release --arm left --arm right` from the openpi root. Send us the transcript |
 | `recorder: ... write failed (...); ... recording disabled` / `recorder: rejecting chunk of shape ... (expected ...)` / `recorder: events.log write failed; event logging disabled` / `recorder: final chunks.npz write failed` / `recorder: result.json write failed` | A log file could not be written (disk full or permissions). The run itself continues | Free disk space / fix `OUT_DIR`; the diagnostics for that episode are incomplete |
 | `WARNING: could not save the report to ...: ...` | A check result file could not be written | Same |
 | `Please answer Enter / k / q.` (or `Enter / q`, `s / f / x`) | You typed something that is not one of the choices; the prompt repeats | Type one of the listed answers |
@@ -690,10 +693,10 @@ What is in a run folder `robot_runs/<run name>/`:
 
 If the container died hard (SIGKILL, `docker kill`, a power cut, the laptop crashed) while a controller was active, the
 client did not get to release it. The arm's impedance controller may still be active and nobody is commanding it. Press the
-E-stop if anything moves, then run, from a new terminal:
+E-stop if anything moves, then run, from a new terminal in the openpi root (this does not depend on `$RC` or `POLICY_SERVER_HOST`; it never talks to the policy server):
 
 ```bash
-$RC release --arm left --arm right
+docker compose -f examples/ebim_task2/compose.robot_client.yml run --rm robot-client release --arm left --arm right
 ```
 
 It deactivates the configured controller of each arm if it is active (even if this client did not activate it) and prints
