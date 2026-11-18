@@ -84,6 +84,14 @@ def test_override_complex_values(load):
     assert cfg.cameras["head"].crop == (0, 10, 640, 360)
 
 
+def test_stream_gap_needs_two_stream_periods(load):
+    msg = errors_of(load, ["stream_hz=10", "safety.stream_gap_freeze_s=0.15"])
+    assert "safety.stream_gap_freeze_s" in msg
+    assert "stream_hz" in msg
+    cfg = load(["stream_hz=20", "safety.stream_gap_freeze_s=0.1"])  # exactly two periods is fine
+    assert cfg.safety.stream_gap_freeze_s == 0.1
+
+
 def test_unknown_key_named(load):
     msg = errors_of(load, ["safety.max_stp_rad=0.05"])
     assert "safety.max_stp_rad" in msg

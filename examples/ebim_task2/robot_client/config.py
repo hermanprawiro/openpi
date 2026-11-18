@@ -592,6 +592,16 @@ def _validate_site(c: _Ctx) -> None:
         elif any(s not in (-1, 1) for s in signs):
             c.errs.append(f"{c.key('joint_signs')}.{arm}: every sign must be 1 or -1, got {list(signs)}")
 
+    # The streamer is unhealthy after a publish gap of stream_gap_freeze_s: allow at least two periods.
+    hz, safety = c.get("stream_hz"), c.get("safety")
+    if isinstance(hz, int | float) and hz > 0 and safety is not None:
+        gap = safety.stream_gap_freeze_s
+        if gap > 0 and gap < 2.0 / hz:
+            c.errs.append(
+                f"{c.key('safety')}.stream_gap_freeze_s: {gap} must be >= 2 / stream_hz "
+                f"(= {2.0 / hz:.4g} s at stream_hz {hz})"
+            )
+
     # start_pose must lie inside the joint limits (catches typos and unit slips before any motion).
     arms, limits = c.get("arms") or {}, (c.get("safety") or SafetyConfig()).joint_limits
     for arm, arm_cfg in arms.items():

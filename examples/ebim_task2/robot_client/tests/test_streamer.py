@@ -449,3 +449,140 @@ def test_healthy_uses_stream_gap_freeze_s():
     finally:
         release.set()
         s.stop()
+
+
+def test_measured_is_called_without_the_lock():
+    robot = Robot()
+    s = None
+
+    def measured(side):
+        s.last_command(side)  # would deadlock if step held the (non-reentrant) lock around this callback
+        return robot.measured(side)
+
+    s = Streamer(
+        SIDES,
+        robot.publish,
+        measured,
+        generous,
+        {side: CommandAdapter("absolute", np.ones(N)) for side in SIDES},
+        LIMITS,
+        SAFETY,
+    )
+    s.start(HOLD, thread=False)
+    worker = threading.Thread(target=lambda: Ticker(s).run(3), daemon=True)
+    worker.start()
+    worker.join(2.0)
+    assert not worker.is_alive()
+    assert len(robot.arr("left")) == 3
+
+
+def test_leash_does_not_stick_on_a_waypoint_beyond_the_limit():
+    robot = Robot()  # measured follows the published command
+    s = make(robot)
+    hold = {side: HOLD[side].copy() for side in SIDES}
+    hold["left"][2] = 2.8
+    robot.pos["left"] = hold["left"].copy()
+    s.start(hold, thread=False)
+    tick = Ticker(s)
+    q_max = LIMITS["left"][1]
+    wp = hold["left"].copy()
+    wp[2] = q_max[2] + 0.6  # unreachable: the arm stops at q_max - margin
+    s.set_waypoint("left", wp)
+    tick.run(20)
+    assert not s.leash_engaged("left")
+    assert s.leash_events == 0
+    assert robot.arr("left")[-1][2] == pytest.approx(q_max[2] - SAFETY.q_margin_rad)
+    # The ramp is not frozen: the next waypoint is followed.
+    back = hold["left"].copy()
+    back[2] = 2.7
+    s.set_waypoint("left", back)
+    tick.run(10)
+    np.testing.assert_array_equal(robot.arr("left")[-1], back)
+
+
+def test_start_rejects_hold_outside_joint_limits():
+    robot = Robot()
+    s = make(robot)
+    hold = {side: HOLD[side].copy() for side in SIDES}
+    hold["right"][3] = -0.1  # q_max[3] = -0.1518
+    with pytest.raises(ValueError, match=r"hold\['right'\].*joint 3 = -0\.1 not in \[-3\.0421, -0\.1518\]"):
+        s.start(hold, thread=False)
+    s.start(HOLD, thread=False)  # nothing was seeded by the refused start
+
+
+@pytest.mark.parametrize("mode", ["absolute", "relative_to_activation"])
+def test_last_command_before_first_tick_is_the_first_publish(mode):
+    robot = Robot()
+    signs = np.array([1, 1, -1, 1, 1, 1, 1])
+    adapters = {side: CommandAdapter(mode, signs) for side in SIDES}
+    s = make(robot, adapters=adapters)
+    s.start(HOLD, thread=False)
+    before = {side: s.last_command(side) for side in SIDES}
+    # Takeover may activate with the reference read before the first tick.
+    adapters["left"].activate(q_activation=robot.measured("left"), ref_cmd=before["left"])
+    s.step(0.01)
+    for side in SIDES:
+        np.testing.assert_array_equal(robot.arr(side)[0], before[side])
+
+
+def test_publish_failure_on_one_side_keeps_the_other_side_streaming():
+    robot = Robot()
+
+    def publish(side, cmd):
+        if side == "left" and len(robot.arr("right")) >= 3:
+            raise RuntimeError("left publisher gone")
+        robot.publish(side, cmd)
+
+    s = Streamer(
+        SIDES,
+        publish,
+        robot.measured,
+        generous,
+        {side: CommandAdapter("absolute", np.ones(N)) for side in SIDES},
+        LIMITS,
+        SAFETY,
+    )
+    s.start(HOLD)
+    try:
+        _wait_for(lambda: s.fault is not None)
+        n_right = len(robot.arr("right"))
+        _wait_for(lambda: len(robot.arr("right")) >= n_right + 10)  # thread alive, right still republished
+        assert "left publisher gone" in s.fault
+        assert not s.healthy()
+        right = robot.arr("right")
+        np.testing.assert_array_equal(right[n_right:], np.tile(s.last_command("right"), (len(right) - n_right, 1)))
+        assert len(robot.arr("left")) == 3  # left publishes first each tick: tick 4's left publish fails
+    finally:
+        s.stop()
+
+
+def test_loop_error_outside_step_sets_fault_and_keeps_republishing():
+    robot = Robot()
+    calls = [0]
+
+    def clock():
+        calls[0] += 1
+        if calls[0] > 10:
+            raise RuntimeError("clock broke")
+        return time.monotonic()
+
+    s = Streamer(
+        SIDES,
+        robot.publish,
+        robot.measured,
+        generous,
+        {side: CommandAdapter("absolute", np.ones(N)) for side in SIDES},
+        LIMITS,
+        SAFETY,
+        clock=clock,
+    )
+    s.start(HOLD)
+    try:
+        _wait_for(lambda: s.fault is not None)
+        n = len(robot.arr("left"))
+        _wait_for(lambda: len(robot.arr("left")) >= n + 10)
+        _wait_for(lambda: len(robot.arr("right")) >= n + 10)
+        assert "clock broke" in s.fault
+        assert not s.healthy()
+    finally:
+        s.stop()

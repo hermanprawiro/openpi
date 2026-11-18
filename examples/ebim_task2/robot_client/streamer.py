@@ -1,16 +1,17 @@
 """The 100 Hz joint command stream: the only thing that publishes arm joint targets (spec §6.4-6.6).
 
 Each tick (`step`), per side: linear interpolation from the current position to the latest 20 Hz
-waypoint over `waypoint_dt` -> tracking leash (if the interpolated target is more than
-`max_track_lag_rad` from the measured joints, the ramp does not advance) -> joint-limit clamp (limits
-minus `q_margin_rad`) -> smoother -> hard clamp to the raw limits (a backstop that should never fire;
+waypoint over `waypoint_dt` -> tracking leash (if the interpolated target, limit-clamped, is more
+than `max_track_lag_rad` from the measured joints, the ramp does not advance) -> joint-limit clamp
+(limits minus `q_margin_rad`) -> smoother -> hard clamp to the raw limits (a backstop that should never fire;
 counted in `hard_clamps`) -> command adapter -> publish. Without waypoints it publishes the hold pose it was started
 with, so there is always a command on the topic while the streamer runs.
 
 `step(now)` does one tick for a given time, so it is testable with a fake clock; the thread only calls
-it at `hz` on absolute deadlines. Supervision: if a tick raises, the thread records `fault` (the first
-exception) and from then on republishes each side's last command every period until `stop()`; it
-never stops publishing on its own. `healthy()` turns false, and the Runner / Session freeze and release.
+it at `hz` on absolute deadlines. Supervision: if a tick (or anything else in the loop, such as the
+clock) raises, the thread records `fault` (the first exception) and from then on republishes each
+side's last command every period until `stop()`; it never stops publishing on its own. The external
+callbacks (`measured`, `publish`) are never called with the internal lock held. `healthy()` turns false, and the Runner / Session freeze and release.
 
 Hold / resume (smoother contract): `hold()` freezes the ramp and calls the smoother's `stop()`, which
 brakes to rest without coming back. A `set_waypoint` after that is applied once the smoother output has
@@ -132,9 +133,19 @@ class Streamer:
         missing = [side for side in self.sides if side not in hold]
         if missing:
             raise ValueError(f"hold: no pose for {missing}")
+        poses = {}
+        for side, arm in self._arms.items():
+            q = _joint_vector(f"hold[{side!r}]", hold[side], arm.q_min.shape)
+            outside = [i for i in range(len(q)) if not arm.q_min[i] <= q[i] <= arm.q_max[i]]
+            if outside:
+                raise ValueError(
+                    f"hold[{side!r}] outside the joint limits: "
+                    + ", ".join(f"joint {i} = {q[i]} not in [{arm.q_min[i]}, {arm.q_max[i]}]" for i in outside)
+                )
+            poses[side] = q
         with self._lock:
             for side, arm in self._arms.items():
-                q = _joint_vector(f"hold[{side!r}]", hold[side], arm.q_min.shape)
+                q = poses[side]
                 arm.smoother.reset(q)
                 arm.start, arm.end, arm.u, arm.out = q.copy(), q.copy(), 1.0, q.copy()
                 arm.holding = arm.resume = arm.still = arm.leash = False
@@ -190,7 +201,8 @@ class Streamer:
         return self._arms[side].pubs
 
     def last_command(self, side: str) -> np.ndarray:
-        """The last command published (or, before the first tick, about to be published) for `side`."""
+        """The last command published for `side`; before the first tick, `adapter(hold)`, which is what the
+        first tick publishes when the hold pose is inside the margin-clamped limits."""
         with self._lock:
             self._require_started()
             return self._arms[side].last_cmd.copy()
@@ -200,12 +212,13 @@ class Streamer:
     def step(self, now: float) -> dict[str, np.ndarray]:
         """One tick at time `now`: compute every side's command, then publish them. Raises on any error
         (the thread turns that into a fault); nothing is published for a tick that raised while
-        computing."""
+        computing. `measured` and `publish` are called without the lock held."""
+        self._require_started()
+        measured = {side: self._read_measured(side) for side in self.sides}
         with self._lock:
-            self._require_started()
             dt = 1.0 / self.hz if self._last_now is None else max(0.0, now - self._last_now)
             self._last_now = now
-            cmds = {side: self._advance(side, arm, dt) for side, arm in self._arms.items()}
+            cmds = {side: self._advance(side, arm, dt, measured[side]) for side, arm in self._arms.items()}
             for side, cmd in cmds.items():
                 self._arms[side].last_cmd = cmd
         for side, cmd in cmds.items():
@@ -213,7 +226,17 @@ class Streamer:
         self.cycles += 1
         return {side: cmd.copy() for side, cmd in cmds.items()}
 
-    def _advance(self, side: str, arm: _Arm, dt: float) -> np.ndarray:
+    def _read_measured(self, side: str) -> np.ndarray:
+        measured = np.asarray(self._measured(side), dtype=np.float64)
+        shape = self._arms[side].q_min.shape
+        if measured.shape != shape:
+            raise ValueError(f"measured[{side!r}]: shape {measured.shape} does not match {shape}")
+        return measured
+
+    def _clamp(self, arm: _Arm, q: np.ndarray) -> tuple[np.ndarray, bool]:
+        return clamp_limits(q, arm.q_min, arm.q_max, self._margin)
+
+    def _advance(self, side: str, arm: _Arm, dt: float, measured: np.ndarray) -> np.ndarray:
         if arm.holding and arm.resume and arm.still:
             arm.smoother.reset(arm.out)
             arm.start, arm.u = arm.out.copy(), 0.0
@@ -222,26 +245,24 @@ class Streamer:
         u = arm.u if arm.holding else min(1.0, arm.u + dt / self.waypoint_dt)
         if u > 1.0 - _U_SNAP:
             u = 1.0
-        target = arm.target(u)
-        measured = np.asarray(self._measured(side), dtype=np.float64)
-        if measured.shape != arm.q_min.shape:
-            raise ValueError(f"measured[{side!r}]: shape {measured.shape} does not match {arm.q_min.shape}")
-        if lag_exceeded(target, measured, self._max_lag):  # NaN measured counts as exceeded
+        # Leash on the limit-clamped target: the arm can never reach a target beyond a limit, so judging the
+        # unclamped one would pin the leash on for good.
+        if lag_exceeded(self._clamp(arm, arm.target(u))[0], measured, self._max_lag):  # NaN counts as exceeded
             if not arm.leash:
                 self.leash_events += 1
                 logger.warning("%s: tracking lag > %.2f rad, waypoint ramp paused", side, self._max_lag)
             arm.leash = True
             u = arm.u
-            target = arm.target(u)
         elif arm.leash:
             arm.leash = False
             logger.info("%s: tracking lag back within %.2f rad, ramp resumed", side, self._max_lag)
         moving = u > arm.u
         arm.u = u
+        target = arm.target(u)
 
         # The segment velocity is passed for the interface; the smoothers track position only (ruling R6).
         vel = (arm.end - arm.start) / self.waypoint_dt if moving else np.zeros_like(target)
-        clamped_target, clamped = clamp_limits(target, arm.q_min, arm.q_max, self._margin)
+        clamped_target, clamped = self._clamp(arm, target)
         if clamped:
             self.limit_clamps += 1
             vel = np.where(clamped_target == target, vel, 0.0)
@@ -291,20 +312,37 @@ class Streamer:
 
     def _run(self) -> None:
         period = 1.0 / self.hz
-        deadline = self._clock()
+        deadline: float | None = None
+        now = 0.0  # last clock reading, used for publish bookkeeping if the clock itself fails
+        loop_error_logged = False
         while not self._stop_evt.is_set():
-            now = self._clock()
-            if self.fault is None:
-                try:
-                    self.step(now)
-                except Exception as e:
-                    self.fault = f"{type(e).__name__}: {e}"
-                    logger.exception("streamer tick failed; republishing the last commands until stopped")
+            try:
+                now = self._clock()
+                if deadline is None:
+                    deadline = now
+                if self.fault is None:
+                    try:
+                        self.step(now)
+                    except Exception as e:
+                        self.fault = f"{type(e).__name__}: {e}"
+                        logger.exception("streamer tick failed; republishing the last commands until stopped")
+                        self._republish(now)
+                else:
                     self._republish(now)
-            else:
-                self._republish(now)
-            deadline += period
-            now = self._clock()
-            if deadline < now - period:  # overran by more than a period: re-anchor, do not burst
-                deadline = now
-            self._stop_evt.wait(max(0.0, deadline - now))
+                deadline += period
+                now = self._clock()
+                if deadline < now - period:  # overran by more than a period: re-anchor, do not burst
+                    deadline = now
+                self._stop_evt.wait(max(0.0, deadline - now))
+            except Exception as e:  # anything else (clock, wait, bookkeeping): never end the thread unfaulted
+                if self.fault is None:
+                    self.fault = f"streamer loop: {type(e).__name__}: {e}"
+                if not loop_error_logged:
+                    loop_error_logged = True
+                    logger.exception("streamer loop failed; republishing the last commands until stopped")
+                deadline = None
+                try:
+                    self._republish(now)
+                    time.sleep(period)
+                except Exception:  # nothing more can be done here; keep looping
+                    pass
