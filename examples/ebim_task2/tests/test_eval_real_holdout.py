@@ -129,3 +129,19 @@ def test_main_writes_json_with_fake_policy(tmp_path, monkeypatch):
     assert out["norm_stats_sha256"] is not None
     assert out["config_name"] == "pi05_lora_ebim_task2_munich_real"
     assert out["num_samples"] == 10 + 1  # frame 0 of each episode, plus frame 1000 of episode 0 (1228 frames)
+
+
+def test_gripper_switch_missed_counts_gt_switches_without_a_prediction():
+    gt = np.r_[np.ones(10), np.zeros(10)]
+    assert ev.gripper_switch_missed(np.ones(20), gt) is True  # GT switches, the prediction never does
+    assert ev.gripper_switch_missed(np.r_[np.ones(12), np.zeros(8)], gt) is False
+    assert ev.gripper_switch_missed(np.r_[np.ones(12), np.zeros(8)], np.ones(20)) is False  # spurious, not missed
+    assert ev.gripper_switch_missed(np.ones(25), np.r_[np.ones(25)]) is False
+    summary = ev.gripper_timing_summary([3.0, None, None, 1.0], [False, True, False, False])
+    assert summary == {
+        "n_both_switch": 2,
+        "n_gt_switch_missed": 1,
+        "n_samples": 4,
+        "mean_abs_steps": 2.0,
+        "max_abs_steps": 3.0,
+    }

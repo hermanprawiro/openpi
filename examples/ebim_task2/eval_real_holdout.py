@@ -55,6 +55,24 @@ def gripper_timing_error(pred_w: np.ndarray, gt_w: np.ndarray) -> float | None:
     return float(abs(pred_sw[0] - gt_sw[0]))
 
 
+def gripper_switch_missed(pred_w: np.ndarray, gt_w: np.ndarray) -> bool:
+    """True if the ground truth switches the gripper within the steps both cover and the prediction never does."""
+    n = min(len(pred_w), len(gt_w))
+    return bool(gripper_switch_steps(np.asarray(gt_w)[:n])) and not gripper_switch_steps(np.asarray(pred_w)[:n])
+
+
+def gripper_timing_summary(errors: list[float | None], missed: list[bool]) -> dict[str, Any]:
+    """Aggregate per-sample timing errors (None: no switch on one side) and missed GT switches of one gripper."""
+    found = [e for e in errors if e is not None]
+    return {
+        "n_both_switch": len(found),
+        "n_gt_switch_missed": int(sum(missed)),
+        "n_samples": len(errors),
+        "mean_abs_steps": float(np.mean(found)) if found else None,
+        "max_abs_steps": float(np.max(found)) if found else None,
+    }
+
+
 def first_step_offset(pred: np.ndarray, state: np.ndarray) -> float:
     """Max |pred[0] - state| over the arm joints (grippers excluded: width % vs knuckle rad)."""
     return float(np.max(np.abs(np.asarray(pred)[0, list(ARM_DIMS)] - np.asarray(state)[list(ARM_DIMS)])))
@@ -105,6 +123,7 @@ def evaluate(policy, dataset, stride: int = 20) -> dict[str, Any]:
     errors: dict[int, list[np.ndarray]] = {h: [] for h in HORIZONS}
     offsets: list[float] = []
     timing: dict[str, list[float | None]] = {name: [] for name in GRIPPER_INDEX}
+    missed: dict[str, list[bool]] = {name: [] for name in GRIPPER_INDEX}
     for start, end in zip(starts, ends, strict=True):
         for i in range(start, end, stride):
             frame = dataset[i]
@@ -115,18 +134,11 @@ def evaluate(policy, dataset, stride: int = 20) -> dict[str, Any]:
             offsets.append(first_step_offset(pred, np.asarray(frame["state"])))
             for name, idx in GRIPPER_INDEX.items():
                 timing[name].append(gripper_timing_error(pred[:, idx], gt[:, idx]))
+                missed[name].append(gripper_switch_missed(pred[:, idx], gt[:, idx]))
 
     mae = {h: np.mean(errors[h], axis=0) for h in HORIZONS}
     grip = list(GRIPPER_INDEX.values())
-    gripper_timing = {}
-    for name, errs in timing.items():
-        found = [e for e in errs if e is not None]
-        gripper_timing[name] = {
-            "n_both_switch": len(found),
-            "n_samples": len(errs),
-            "mean_abs_steps": float(np.mean(found)) if found else None,
-            "max_abs_steps": float(np.max(found)) if found else None,
-        }
+    gripper_timing = {name: gripper_timing_summary(timing[name], missed[name]) for name in GRIPPER_INDEX}
     return {
         "num_samples": len(offsets),
         "num_episodes": len(starts),
