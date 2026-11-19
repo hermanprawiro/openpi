@@ -15,7 +15,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --repo) repo="${2:?--repo needs a value}"; shift 2 ;;
     --dry-run) dry_run=1; shift ;;
-    -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "error: unknown option $1" >&2; exit 2 ;;
     *) pos+=("$1"); shift ;;
   esac
@@ -59,9 +59,10 @@ run "${hf[@]}" upload "$repo" "$ckpt/params" "$dest/params"
 run "${hf[@]}" upload "$repo" "$ckpt/assets" "$dest/assets"
 run "${hf[@]}" upload "$repo" "$ckpt/holdout_eval.json" "$dest/holdout_eval.json"
 
+if [[ $dry_run -eq 1 ]]; then verb="Would upload"; else verb="Uploaded"; fi
 cat <<MSG
 
-Uploaded $dest to $repo. To serve it on another machine:
+$verb $dest to $repo. To serve it on another machine:
   huggingface-cli download $repo --include "$dest/*" --local-dir checkpoints
   examples/ebim_task2/serve_munich.sh $config checkpoints/$dest
 MSG
