@@ -132,21 +132,43 @@ state); and the `norm_stats_sha256` the model was evaluated with.
 Check `gripper_timing` and `gripper_mae` as tie-breakers. The hold-out is open-loop teacher forcing, so it ranks
 steps but does not predict closed-loop success; always do a supervised dry run on the robot.
 
+LoRA stand-in (`pi05_lora_ebim_task2_munich_real/munich_v1`, 321 samples, stride 20):
+
+| Step | arm MAE@10 | arm MAE@25 | arm MAE@50 | gripper MAE@25 | first_step_offset p50 / p95 / max (rad) |
+|---|---|---|---|---|---|
+| 2500 | 0.0393 | 0.0513 | 0.0665 | 0.0308 | 0.166 / 0.515 / 0.862 |
+| 5000 | 0.0344 | 0.0464 | 0.0612 | 0.0243 | 0.129 / 0.374 / 0.649 |
+| 7500 | 0.0327 | 0.0443 | 0.0586 | 0.0250 | 0.138 / 0.359 / 0.685 |
+| 10000 | 0.0315 | 0.0434 | 0.0583 | 0.0223 | 0.122 / 0.354 / 0.601 |
+| **12500** | **0.0298** | **0.0410** | **0.0552** | **0.0205** | 0.113 / **0.309** / 0.484 |
+| 14999 | 0.0304 | 0.0417 | 0.0559 | 0.0229 | 0.117 / 0.327 / 0.522 |
+
+No LoRA step met the p95 < 0.3 rad gate (the recorded data itself has p95 0.198 rad between the action and the measured
+state on the same frames). Step 12500 has both the lowest arm MAE@25 and the lowest p95, so it is the shipped stand-in.
+The gate matters for the client at rest, where it checks the first chunk: on the first frame of each of the 10 hold-out
+episodes step 12500's first-step offset was 0.05 to 0.25 rad (max 0.253), inside `max_start_offset_rad`.
+
 ## 6. Upload
 
 ```bash
+examples/ebim_task2/upload_checkpoint.sh pi05_ebim_task2_munich_real munich_v1 30000 --dry-run   # prints the commands
 examples/ebim_task2/upload_checkpoint.sh pi05_ebim_task2_munich_real munich_v1 30000
 ```
 
-Uploads `params/`, `assets/` and `holdout_eval.json` to the HF repo `Ching-Yeh/ebim-task2` under
+Uploads `params/`, `assets/` and `holdout_eval.json` to the HF model repo `hermanprawiro/ebim-task2-real` under
 `<config>/<exp>/<step>/` (same layout as on disk; `--repo` selects another repo, `--dry-run` only prints the commands).
-It refuses when `params/`, `assets/` (with a `norm_stats.json`) or `holdout_eval.json` is missing, and never uploads
-`train_state/`. You need `huggingface-cli login` (or `HF_TOKEN`) with write access first. It prints the matching
-download and serve commands. To fetch a step on another machine:
+A missing repo is created **private**. It refuses when `params/`, `assets/` (with a `norm_stats.json`) or
+`holdout_eval.json` is missing, and never uploads `train_state/`. You need `HF_TOKEN` (or `huggingface-cli login`) with
+write access first. Export only the token: `.env`'s `HF_HOME=~/...` is not tilde-expanded by `uv run --env-file`, so
+`uv run --env-file .env ...` would put the upload cache in a directory literally named `~` and the Xet upload fails
+(`MerkleDB Shard error: File I/O error`). The script prints the matching download and serve commands. To fetch a step
+on another machine (the repo is private unless its owner made it public: set `HF_TOKEN` first):
 
 ```bash
-huggingface-cli download Ching-Yeh/ebim-task2 --include "pi05_ebim_task2_munich_real/munich_v1/30000/*" --local-dir checkpoints
+huggingface-cli download hermanprawiro/ebim-task2-real --include "pi05_ebim_task2_munich_real/munich_v1/30000/*" --local-dir checkpoints
 ```
+
+The LoRA stand-in shipped for the Munich session is `pi05_lora_ebim_task2_munich_real/munich_v1/12500`.
 
 ## 7. Serve and swap checkpoints
 
@@ -155,12 +177,13 @@ examples/ebim_task2/serve_munich.sh pi05_ebim_task2_munich_real checkpoints/pi05
 ```
 
 This wraps `examples/ebim_task2/compose.policy_server.yml` (build from `scripts/docker/serve_policy.Dockerfile`, repo
-bind-mounted at `/app`, checkpoint step dir mounted read-only at `/ckpt`, host networking, one GPU, default port
-8000). It first checks that `<ckpt_dir>/params` and `<ckpt_dir>/assets` exist. Without the wrapper:
+bind-mounted at `/app`, checkpoint step dir mounted read-only at `/ckpt/<exp>/<step>`, host networking, one GPU, default
+port 8000). It first checks that `<ckpt_dir>/params` and `<ckpt_dir>/assets` exist. The server reports `<exp>/<step>` to
+clients as the checkpoint name. Without the wrapper:
 
 ```bash
 POLICY_CONFIG=pi05_ebim_task2_munich_real CKPT_DIR=$PWD/checkpoints/pi05_ebim_task2_munich_real/munich_v1/30000 \
-  PORT=8000 docker compose -f examples/ebim_task2/compose.policy_server.yml up --build
+  CKPT_NAME=munich_v1/30000 PORT=8000 docker compose -f examples/ebim_task2/compose.policy_server.yml up --build
 ```
 
 **Swapping a checkpoint is server-side only**: stop the container, start it again with another `POLICY_CONFIG`
@@ -175,7 +198,9 @@ machine with internet and copy the file to the same relative path, or run once t
 uv run python -c "import openpi.shared.download as d; print(d.maybe_download('gs://big_vision/paligemma_tokenizer.model', gs={'token': 'anon'}))"
 ```
 
-The server is ready when the log shows the warm-up finished (about a minute to load plus ~40 s to compile).
+Starting the server needs no other network access: the compose file sets `UV_NO_SYNC=1` and `PYTHONPATH=/app/src`, so
+`uv run` does not re-sync from PyPI in a new container (see `SERVER.md` section 6). The server is ready when the log
+shows the warm-up finished (about a minute to load plus ~40 s to compile).
 
 ## 8. Troubleshooting
 

@@ -1,10 +1,12 @@
 # Serve one trained Munich checkpoint. Swapping checkpoints = change POLICY_CONFIG and CKPT_DIR only.
 #
 #   POLICY_CONFIG=pi05_ebim_task2_munich_real \
-#   CKPT_DIR=/abs/path/checkpoints/pi05_ebim_task2_munich_real/munich_v1/30000 \
+#   CKPT_DIR=/abs/path/checkpoints/pi05_ebim_task2_munich_real/munich_v1/30000 CKPT_NAME=munich_v1/30000 \
 #   docker compose -f examples/ebim_task2/compose.policy_server.yml up --build
 #
-# Prefer examples/ebim_task2/serve_munich.sh, which checks the checkpoint layout first.
+# Prefer examples/ebim_task2/serve_munich.sh, which checks the checkpoint layout first and sets CKPT_NAME.
+# CKPT_NAME (<exp>/<step>) is where the step dir is mounted under /ckpt; the server reports the last two
+# components of that path to every client as the `checkpoint` id (recorded in server_metadata.json).
 # The image has no source: the repo is bind-mounted at /app and the CMD runs
 # `uv run scripts/serve_policy.py $SERVER_ARGS` (same image as scripts/docker/compose.yml).
 services:
@@ -19,7 +21,7 @@ services:
     volumes:
       # Compose resolves relative paths against this file's directory: ../.. is the repo root.
       - ../..:/app
-      - ${CKPT_DIR:?set CKPT_DIR to the checkpoint step dir (contains params/ and assets/)}:/ckpt:ro
+      - ${CKPT_DIR:?set CKPT_DIR to the checkpoint step dir (contains params/ and assets/)}:/ckpt/${CKPT_NAME:-unnamed}:ro
       # Download cache (PaliGemma tokenizer lands in big_vision/paligemma_tokenizer.model).
       - ${OPENPI_DATA_HOME:-${HOME}/.cache/openpi}:/openpi_assets
     environment:
@@ -30,7 +32,7 @@ services:
       # project and the dev group from PyPI) and fails offline. The project itself comes from the bind-mounted source.
       - UV_NO_SYNC=1
       - PYTHONPATH=/app/src
-      - SERVER_ARGS=--port ${PORT:-8000} policy:checkpoint --policy.config=${POLICY_CONFIG:?set POLICY_CONFIG to the training config name} --policy.dir=/ckpt
+      - SERVER_ARGS=--port ${PORT:-8000} policy:checkpoint --policy.config=${POLICY_CONFIG:?set POLICY_CONFIG to the training config name} --policy.dir=/ckpt/${CKPT_NAME:-unnamed}
     deploy:
       resources:
         reservations:

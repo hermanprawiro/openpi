@@ -17,27 +17,33 @@ the client refuses a server whose layout or prompt does not match.
   GPU job should run on the same GPU.
 - The openpi checkout at the commit we gave you (the same one as for the client). **The server container does not contain
   the source code: it bind-mounts the checkout at `/app` and runs `uv run scripts/serve_policy.py` there.**
-- Internet access for the first build and the first start (see [section 6](#6-offline-use-not-yet-verified)).
+- Internet access for the image build and the checkpoint download. Starting the server afterwards works without
+  internet once the tokenizer file is in place (see [section 6](#6-offline-use)).
 - The checkpoint we name in the hand-over message, as three words: `<config>`, `<exp>`, `<step>`. The two configs we
   ship are `pi05_lora_ebim_task2_munich_real` (LoRA, the stand-in) and `pi05_ebim_task2_munich_real` (full fine-tune).
+  **Shipped now: `pi05_lora_ebim_task2_munich_real` `munich_v1` `12500`** (the LoRA stand-in; best hold-out step, see
+  its `holdout_eval.json`). The commands below use it.
 
 ## 2. Get the checkpoint
 
-The checkpoints are in the Hugging Face repository `Ching-Yeh/ebim-task2`, laid out as
-`<config>/<exp>/<step>/{params,assets}` (the same layout as openpi's own `checkpoints/` folder; no `train_state/`).
-From the root of the openpi checkout:
+The checkpoints are in the Hugging Face model repository `hermanprawiro/ebim-task2-real`, laid out as
+`<config>/<exp>/<step>/{params,assets,holdout_eval.json}` (the same layout as openpi's own `checkpoints/` folder; no
+`train_state/`). **The repository is private unless its owner has made it public.** While it is private you need a
+Hugging Face access token that we gave you read access for: `export HF_TOKEN=<token>` (or `huggingface-cli login`)
+before downloading; without it the download fails with `401` / `Repository Not Found`. From the root of the openpi
+checkout:
 
 ```bash
 pip install -U "huggingface_hub[cli]"      # once; newer versions call the command `hf`
-huggingface-cli download Ching-Yeh/ebim-task2 \
+huggingface-cli download hermanprawiro/ebim-task2-real \
     --include "<config>/<exp>/<step>/*" --local-dir checkpoints
 ```
 
-For example (replace with the values from the hand-over message):
+The shipped checkpoint (6.3 GB):
 
 ```bash
-huggingface-cli download Ching-Yeh/ebim-task2 \
-    --include "pi05_ebim_task2_munich_real/munich_v1/30000/*" --local-dir checkpoints
+huggingface-cli download hermanprawiro/ebim-task2-real \
+    --include "pi05_lora_ebim_task2_munich_real/munich_v1/12500/*" --local-dir checkpoints
 ```
 
 The checkpoint directory is then `checkpoints/<config>/<exp>/<step>`. Check that it contains `params/` and `assets/`,
@@ -54,13 +60,14 @@ examples/ebim_task2/serve_munich.sh <config> <ckpt_dir> [port]
 for example
 
 ```bash
-examples/ebim_task2/serve_munich.sh pi05_ebim_task2_munich_real checkpoints/pi05_ebim_task2_munich_real/munich_v1/30000
+examples/ebim_task2/serve_munich.sh pi05_lora_ebim_task2_munich_real checkpoints/pi05_lora_ebim_task2_munich_real/munich_v1/12500
 ```
 
 - `<config>` **must be the config the checkpoint was trained with** (the directory name of the checkpoint's first level).
   A LoRA checkpoint with the full-FT config name, or the reverse, fails to load.
 - `<ckpt_dir>` is the step directory (it contains `params/` and `assets/`). The script checks that and stops with an
-  error otherwise. It is mounted read-only at `/ckpt` in the container.
+  error otherwise. It is mounted read-only at `/ckpt/<exp>/<step>` in the container; the server reports `<exp>/<step>`
+  (e.g. `munich_v1/12500`) to every client as the checkpoint name.
 - `[port]` defaults to 8000. The server listens on all interfaces (host networking); open that TCP port for the robot
   laptop in the firewall.
 - The first start builds the image (`scripts/docker/serve_policy.Dockerfile`, a CUDA 12.2 base image, uv and the Python
@@ -72,12 +79,12 @@ examples/ebim_task2/serve_munich.sh pi05_ebim_task2_munich_real checkpoints/pi05
 Without the wrapper script (this is what it runs):
 
 ```bash
-POLICY_CONFIG=<config> CKPT_DIR=$PWD/checkpoints/<config>/<exp>/<step> PORT=8000 \
+POLICY_CONFIG=<config> CKPT_DIR=$PWD/checkpoints/<config>/<exp>/<step> CKPT_NAME=<exp>/<step> PORT=8000 \
   docker compose -f examples/ebim_task2/compose.policy_server.yml up --build
 ```
 
 Both `POLICY_CONFIG` and `CKPT_DIR` are required; docker compose stops with `required variable ... is missing a value`
-otherwise. The compose file also mounts `~/.cache/openpi` (override with `OPENPI_DATA_HOME`) at `/openpi_assets` for the
+otherwise. Without `CKPT_NAME` the server works but reports the checkpoint as `ckpt/unnamed`. The compose file also mounts `~/.cache/openpi` (override with `OPENPI_DATA_HOME`) at `/openpi_assets` for the
 downloaded tokenizer.
 
 ## 4. Expected log lines and the health check
@@ -113,8 +120,10 @@ $RC check-infer          # see README_ROBOT_CLIENT.md, section 4.2
 the robot laptop, with `POLICY_SERVER_HOST` set to this machine).
 
 Required: `check_infer: PASS`; the `server` row shows `layout munich16`, the config name and the checkpoint name
-(`<exp>/<step>`); the chunk shape is `(50, 16)`. Typical inference time on an L4 was about 0.5 to 0.6 s per request in an
-evaluator's measurement of a different pi0.5 (round trip 0.59 s); we expect similar or better after the warm-up.
+(`<exp>/<step>`, for the shipped one `config pi05_lora_ebim_task2_munich_real, checkpoint munich_v1/12500`); the chunk
+shape is `(50, 16)`. On our RTX 3090, with the client on the same machine, the shipped checkpoint took about 0.2 s per
+request (round trip mean 193 ms, max 432 ms over 10 requests; server inference about 170-190 ms). An evaluator measured
+0.5 to 0.6 s per request on an L4 for a different pi0.5 (round trip 0.59 s); expect something in between.
 `check-infer` warns if the slowest request is longer than the 1.5 s one executed chunk lasts.
 
 ## 5. Swapping the checkpoint
@@ -132,13 +141,22 @@ to be restarted between episodes (it reconnects, checks the layout again, and re
 Do not swap while an episode is running: the client would reconnect at the next request, and an episode in progress would
 freeze (`inference dry for ...`) while the server is down.
 
-## 6. Offline use: not yet verified
+## 6. Offline use
 
-What we know from the files, not from a test:
+Verified on our machine: once the image is built and the tokenizer file is in place, a new server container starts and
+reaches `Warmup done` with **no network at all** (container run with `network_mode: none`).
 
-- The PaliGemma tokenizer is downloaded on the first start into `OPENPI_DATA_HOME` (default `~/.cache/openpi`, mounted at
-  `/openpi_assets`) as `big_vision/paligemma_tokenizer.model`. **On a GPU machine without internet, put that file there
-  in advance.** On any machine with internet, either fetch it directly:
+- **Build with internet.** The image build (`serve_policy.Dockerfile`) installs every Python dependency
+  (`uv sync --frozen --no-install-project --no-dev`) and needs internet. Build it before the session:
+  `POLICY_CONFIG=x CKPT_DIR=/tmp docker compose -f examples/ebim_task2/compose.policy_server.yml build` (the two
+  variables only need a value), or simply do a first start with internet.
+- **Starting needs no package index.** The compose file sets `UV_NO_SYNC=1` and `PYTHONPATH=/app/src`, so `uv run` uses
+  the image's environment as built and takes the openpi code from the mounted checkout. (Without them, every new
+  container would re-sync from PyPI at start and fail offline with `Failed to download ... are you offline?`.)
+  Swapping the checkpoint creates a new container; that also works offline.
+- **Tokenizer.** The PaliGemma tokenizer is downloaded on the first start into `OPENPI_DATA_HOME` (default
+  `~/.cache/openpi`, mounted at `/openpi_assets`) as `big_vision/paligemma_tokenizer.model`. **On a GPU machine without
+  internet, put that file there in advance.** On any machine with internet, either fetch it directly:
 
   ```bash
   mkdir -p ~/.cache/openpi/big_vision
@@ -153,22 +171,15 @@ What we know from the files, not from a test:
   ```
 
   and copy the file to the same relative path on the server machine.
-- The image build (`serve_policy.Dockerfile`) installs the dependencies with `uv sync --frozen --no-install-project
-  --no-dev` and needs internet. The container's command is `uv run scripts/serve_policy.py ...`, and `uv run` re-syncs the
-  environment with the project (which the build did not install) and the default dev dependency group (which the build
-  excluded). **We therefore expect the first start of a new container to need access to the Python package index, and we have
-  not verified that it works without it.** Plan for network access on the day, and do the first start with internet well
-  before the session so you can see `Warmup done`.
-- Changing `POLICY_CONFIG` or `CKPT_DIR` makes compose create a new container, which we expect to repeat that sync.
-
-If the GPU machine really has no internet at the session, tell us beforehand; we have a check for this on our list but
-have not run it yet.
+- **Checkpoint.** Download it ([section 2](#2-get-the-checkpoint)) while you have internet; serving reads only the local
+  step directory.
 
 ## 7. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `error: checkpoint dir not found: ...` / `error: .../params is missing (point at the step dir, e.g. .../<exp>/30000)` (from `serve_munich.sh`) | Wrong `<ckpt_dir>`, or an incomplete download | Point at the step directory that contains `params/` and `assets/`; download again |
+| `401 Client Error` / `Repository Not Found` while downloading | The repository is private and no token (or one without access) is set | `export HF_TOKEN=<token we gave you>` or `huggingface-cli login`, then download again |
 | `required variable CKPT_DIR is missing a value` / `... POLICY_CONFIG ...` | Compose was run without the variables | Use `serve_munich.sh`, or set both |
 | Errors about missing or mismatching parameters while loading, or a shape error | `<config>` does not match the checkpoint (LoRA vs full fine-tune), or the checkpoint is not a Munich one | Use the config named by the checkpoint's first directory level |
 | `FileNotFoundError` for `norm_stats.json` | The `assets/` folder is missing or in the wrong place | Download the whole `<config>/<exp>/<step>/*`; `assets/ebim/task2_munich_real/norm_stats.json` must exist |

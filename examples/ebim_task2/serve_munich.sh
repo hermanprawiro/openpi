@@ -32,7 +32,9 @@ for sub in params assets; do
 done
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-export POLICY_CONFIG="$config" CKPT_DIR="$ckpt_dir" PORT="$port"
-echo "serving config=$config ckpt=$ckpt_dir port=$port"
+# The checkpoint id the server reports to clients: <exp>/<step>, the last two components of the step dir.
+ckpt_name="$(basename "$(dirname "$ckpt_dir")")/$(basename "$ckpt_dir")"
+export POLICY_CONFIG="$config" CKPT_DIR="$ckpt_dir" CKPT_NAME="$ckpt_name" PORT="$port"
+echo "serving config=$config ckpt=$ckpt_dir (id $ckpt_name) port=$port"
 # shellcheck disable=SC2086
 exec docker compose -f "$here/compose.policy_server.yml" up ${COMPOSE_UP_ARGS:---build}
