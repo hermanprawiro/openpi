@@ -85,7 +85,9 @@ GATE_POLL_S = 0.05  # start gate: key / stream health polling period
 FIRST_HOLD_WAIT_S = 1.0  # dry run: how long to wait for the streamer's first hold command
 LIVE_OBS_WAIT_S = 3.0  # check-infer: how long to wait for a complete live snapshot
 
-RESET_PROMPT = "Reset the scene. Workspace clear? [Enter] move to start pose / [k] keep current pose / [q] quit: "
+RESET_PROMPT = (
+    "Reset the scene. Workspace clear? [Enter] move both arms to the start pose / [k] keep current pose / [q] quit: "
+)
 START_PROMPT = "Press Enter to start the policy (q to release and quit)"
 OUTCOME_PROMPT = "Outcome? [s]uccess / [f]ail / [x] skip: "
 NOTE_PROMPT = "Note (optional, Enter to skip): "
@@ -395,7 +397,7 @@ def parse_args(argv: Sequence[str] | None = None, env: Mapping[str, str] | None 
     p.add_argument("--arm", required=True, choices=ARM_NAMES)
     p.add_argument("--joint", type=_joint_arg, default="all", help="all or a joint number 1..7 (default all)")
     p.add_argument("--delta", type=_delta_arg, default=0.05, help="move in rad (default %(default)s)")
-    sub.add_parser("prepare", parents=[common], help="move to the start pose (after an Enter)")
+    sub.add_parser("prepare", parents=[common], help="move both arms to the start pose (after an Enter)")
     p = sub.add_parser("run", parents=[common], help="run policy episodes")
     p.add_argument("--episodes", type=int, default=None, help="stop after N episodes (default: until q)")
     p.add_argument("--dry-run", action="store_true", help="nothing moves: preview topics only")
@@ -648,7 +650,7 @@ def cmd_prepare(ctx: Context) -> int:
         cms = make_controller_managers(node, cfg)
         backend = _backend_or_refuse(node, cfg)
         choice = ask_choice(
-            ctx.console, "Workspace clear? [Enter] move to start pose / [q] quit: ", ("", "q"), on_eof="q"
+            ctx.console, "Workspace clear? [Enter] move both arms to the start pose / [q] quit: ", ("", "q"), on_eof="q"
         )
         if choice == "q":
             print("Nothing was moved.")

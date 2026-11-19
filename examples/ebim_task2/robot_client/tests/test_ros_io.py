@@ -290,8 +290,10 @@ def test_measured_age_tracks_the_last_sample(cfg, make_node, helper):
 
     wait_until(have, what="left joints")
     assert node.measured_age("left") < 0.5
-    time.sleep(0.4)  # the stream stops
-    assert node.measured_age("left") >= 0.4
+    time.sleep(0.2)  # the stream stops (messages still in flight arrive)
+    first = node.measured_age("left")
+    time.sleep(0.4)
+    assert node.measured_age("left") >= first + 0.39
     assert node.measured_age("nonexistent") == float("inf")
 
 

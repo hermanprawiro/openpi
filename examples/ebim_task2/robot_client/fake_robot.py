@@ -2,7 +2,7 @@
 
     python -m robot_client.fake_robot --site PATH [--episode-dir DIR --episode N [--still]]
         [--events /out/fake_robot_events.jsonl] [--tau 0.05] [--command-mode absolute|relative --signs 1,-1,1,1,1,1,1]
-        [--left-gripper-state on|off] [--controller-state unconfigured|inactive|active]
+        [--left-gripper-state on|off] [--controller-state unconfigured|inactive|active] [--refuse-deactivate SIDE ...]
 
 Everything is served on the topic / service / action names of the site YAML:
 
@@ -21,7 +21,9 @@ Everything is served on the topic / service / action names of the site YAML:
 - gripper knuckle state (50 Hz) following the width commands: knuckle = 0.8 * (1 - width); `--left-gripper-state off`
   never publishes the left one (Munich has no left gripper state).
 - per arm, `<controller_manager>/list_controllers` and `/switch_controller` (STRICT: activating needs `inactive`,
-  deactivating needs `active`); `--controller-state` sets the impedance controllers' initial state.
+  deactivating needs `active`); `--controller-state` sets the impedance controllers' initial state;
+  `--refuse-deactivate SIDE` (repeatable) makes that arm's switch_controller refuse every deactivation (ok false,
+  state unchanged), like a controller_manager that cannot stop the controller.
 - per arm, the franka PTP action (aborted while the impedance controller is active; ramps each joint at its
   `maximum_joint_velocities`), the spine MoveAbsolute action (ramps at the goal velocity) and the spine GetPosition
   service (starting at `spine.height`).
@@ -249,6 +251,7 @@ class FakeRobot(Node):
         signs: np.ndarray,
         left_gripper_state: bool,
         controller_state: str,
+        refuse_deactivate: Sequence[str] = (),
         episode_dir: Path | None = None,
         episode: int = 0,
         still: bool = False,
@@ -259,6 +262,7 @@ class FakeRobot(Node):
         self.tau = tau
         self.command_mode = command_mode
         self.signs = signs
+        self.refuse_deactivate = frozenset(refuse_deactivate)
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -528,7 +532,10 @@ class FakeRobot(Node):
                     problems.append(f"{name} is not loaded")
                 elif arm.controller_state != "active":
                     problems.append(f"{name} is {arm.controller_state}, cannot deactivate")
-            ok = not (strict and problems)
+            refused = bool(deactivate) and side in self.refuse_deactivate
+            if refused:
+                problems.append("deactivation refused (--refuse-deactivate)")
+            ok = not (strict and problems) and not refused
             if ok:  # BEST_EFFORT: apply what is possible
                 if arm.controller in deactivate and arm.controller_state == "active":
                     arm.controller_state = "inactive"
@@ -696,6 +703,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--left-gripper-state", choices=("on", "off"), default="on")
     parser.add_argument("--controller-state", choices=CONTROLLER_STATES, default="inactive")
+    parser.add_argument(
+        "--refuse-deactivate",
+        action="append",
+        choices=ARM_NAMES,
+        default=[],
+        help="this arm's switch_controller refuses every deactivation (repeatable)",
+    )
     return parser.parse_args(argv)
 
 
@@ -721,6 +735,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             signs=args.signs,
             left_gripper_state=args.left_gripper_state == "on",
             controller_state=args.controller_state,
+            refuse_deactivate=args.refuse_deactivate,
             episode_dir=args.episode_dir,
             episode=args.episode,
             still=args.still,

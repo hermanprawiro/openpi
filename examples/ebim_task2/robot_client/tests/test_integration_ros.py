@@ -42,7 +42,7 @@ PROMPT_TIMEOUT_S = 60.0  # a CLI prompt appears
 EXIT_TIMEOUT_S = 30.0  # the CLI exits after its last answer
 TERMINATE_GRACE_S = 3.0  # SIGTERM -> SIGKILL at teardown
 
-RESET_PROMPT = r"\[Enter\] move to start pose / \[k\] keep current pose"
+RESET_PROMPT = r"\[Enter\] move both arms to the start pose / \[k\] keep current pose"
 START_PROMPT = "Press Enter to start the policy"
 OUTCOME_PROMPT = r"Outcome\? \[s\]uccess"
 NOTE_PROMPT = r"Note \(optional"
@@ -367,6 +367,24 @@ class RosPeer:
         pub = self.node.create_publisher(type(msg), topic, 10)
         self.node.create_timer(1.0 / hz, lambda: pub.publish(make_msg()))
 
+    def switch(self, side: str, *, activate: tuple[str, ...] = (), deactivate: tuple[str, ...] = ()) -> bool:
+        """The organizers' tooling: call `/<side>/controller_manager/switch_controller` (STRICT) and wait."""
+        from controller_manager_msgs.srv import SwitchController
+
+        client = self.node.create_client(SwitchController, f"/{side}/controller_manager/switch_controller")
+        try:
+            assert client.wait_for_service(timeout_sec=START_TIMEOUT_S), f"no switch_controller for {side}"
+            request = SwitchController.Request(
+                activate_controllers=list(activate),
+                deactivate_controllers=list(deactivate),
+                strictness=SwitchController.Request.STRICT,
+            )
+            future = client.call_async(request)
+            wait_until(future.done, START_TIMEOUT_S, f"the {side} switch_controller answer")
+            return bool(future.result().ok)
+        finally:
+            self.node.destroy_client(client)
+
     def close(self) -> None:
         self.executor.shutdown(timeout_sec=2.0)
         self.thread.join(2.0)
@@ -398,6 +416,7 @@ def test_takeover_ordering_and_continuous_stream(harness):
 
     released = [e for e in harness.client_events() if e["kind"] == "released"]
     assert len(released) == 1, harness.client_events()
+    (episode_start,) = [e for e in harness.client_events() if e["kind"] == "episode_start"]
     for side in SIDES:
         cmds = commands(robot, side)
         activates = switches(robot, side, "activate")
@@ -417,6 +436,12 @@ def test_takeover_ordering_and_continuous_stream(harness):
         assert len(before) >= 20, f"{side}: only {len(before)} commands before the activation"
         devs = [max_dev(c["position"], c["measured"]) for c in before[-20:]]
         assert max(devs) <= 0.02, f"{side}: the last 20 hold commands deviate up to {max(devs):.4f} rad"
+
+        # activation window: from the activation until the policy starts, every command is the arm's own pose
+        window = [c for c in cmds if c["active"] and c["mono"] < episode_start["mono"]]
+        assert len(window) >= 5, f"{side}: only {len(window)} commands between activation and the policy start"
+        dev = max(max_dev(c["position"], c["measured"]) for c in window)
+        assert dev <= 1e-3, f"{side}: a command before the first policy waypoint is {dev:.5f} rad from measured"
 
         # the impedance controller was deactivated (by the release) after the activation, while still streaming
         deactivate = [d for d in deactivates if d["mono"] > activate["mono"]]
@@ -621,9 +646,110 @@ def test_server_killed_mid_episode_releases(harness):
     client.expect(NOTE_PROMPT)
     client.send("")
     assert client.wait() == 3, client.tail()
-    assert harness.episode()["result"]["outcome"] == "freeze"
+    episode = harness.episode()
+    assert episode["result"]["outcome"] == "freeze"
+    (episode_start,) = [e for e in harness.client_events() if e["kind"] == "episode_start"]
+    # The freeze ends the episode at the tick after the last recorded step (the runner's t0 is just after the event).
+    freeze_mono = episode_start["mono"] + episode["steps"][-1]["t"] + 0.1
     for side in SIDES:
         deactivate = [d for d in switches(robot, side, "deactivate") if d["mono"] > killed]
         assert deactivate, f"{side}: not deactivated after the server died: {robot.events('switch', side=side)}"
         assert deactivate[0]["mono"] - killed < 15.0
         assert deactivate[0]["mono"] < commands(robot, side)[-1]["mono"], f"{side}: stream stopped before release"
+        # the freeze is a hold: from the freeze until the deactivation every command is the same pose
+        held = [c for c in commands(robot, side) if freeze_mono <= c["mono"] <= deactivate[0]["mono"]]
+        assert len(held) >= 40, f"{side}: only {len(held)} commands between the freeze and the deactivation"
+        spread = max(max_dev(c["position"], held[0]["position"]) for c in held)
+        assert spread <= 1e-5, f"{side}: the commands moved {spread:.6f} rad after the freeze"
+
+
+# ---- off-nominal controller states (final review C2, I1, I2) ----
+
+
+def test_refuses_an_already_active_controller(harness):
+    """An active controller (left on by bring-up / a failed release) would act on our first message: `run` and
+    `check-motion` refuse before publishing anything and never switch it."""
+    robot = harness.fake_robot("--controller-state", "active")
+    harness.stub("--latency-s", "0.2")
+    client = harness.client("run", "--episodes", "1")
+    client.expect(RESET_PROMPT)
+    client.send("k")
+    assert client.wait() == 2, client.tail()
+    refusal = re.search(r"REFUSED: [^\n]*", client.output)
+    assert refusal, client.tail()
+    assert "already active" in refusal.group(0), client.tail()
+    assert "release --arm left" in refusal.group(0), client.tail()
+
+    check = harness.client("check-motion", "--arm", "right", run_name="motion")
+    check.expect("Workspace clear")
+    check.send("")
+    assert check.wait() == 2, check.tail()
+    assert "already active" in check.output, check.tail()
+
+    assert not robot.events("switch"), robot.events("switch")
+    for side in SIDES:
+        assert not commands(robot, side), f"the client published {side} commands into an active controller"
+
+
+def test_refused_deactivation_keeps_holding_until_the_operator_confirms(harness):
+    robot = harness.fake_robot("--refuse-deactivate", "left")
+    harness.stub("--latency-s", "0.2")
+    client = harness.client("run", "--episodes", "1", "--set", "safety.episode_timeout_s=3")
+    client.expect(RESET_PROMPT)
+    client.send("k")
+    press_start(client)
+    client.expect(r"CONTROLLER STILL ACTIVE on /left/controller_manager \(joint_impedance_controller\)")
+    refused = [e for e in robot.events("switch", side="left") if not e["ok"]]
+    assert len(refused) > 1, f"the deactivation was not retried: {refused}"
+    n = len(commands(robot, "left"))
+    time.sleep(1.0)
+    assert len(commands(robot, "left")) >= n + 50, "the hold stopped streaming while the controller was active"
+    client.send("")  # the operator handled it
+    assert client.wait() == 5, client.tail()
+    assert "Released." not in client.output, client.tail()
+    assert "has been released" not in client.output, client.tail()
+
+    left = commands(robot, "left")
+    assert left[-1]["mono"] - refused[0]["mono"] >= 5.0, "the hold did not outlast the deactivation retries"
+    gaps = np.diff([c["mono"] for c in left if c["mono"] >= refused[0]["mono"]])
+    assert gaps.max() < 0.05, f"gap of {gaps.max() * 1000:.0f} ms in the hold while the controller was active"
+    assert switches(robot, "right", "deactivate"), "the right arm was not released"
+    released = [e for e in harness.client_events() if e["kind"] == "released"]
+    assert released[-1]["still_active"] == ["left"], released
+    assert harness.episode()["result"]["outcome"] == "freeze"
+
+
+def test_external_mode_streams_until_the_operator_deactivates(harness, peer):
+    robot = harness.fake_robot()
+    harness.stub("--latency-s", "0.2")
+    client = harness.client(
+        "run", "--episodes", "1", "--set", "takeover.mode=external", "--set", "safety.episode_timeout_s=3"
+    )
+    client.expect(RESET_PROMPT)
+    client.send("k")
+    for side in SIDES:  # the organizers' tooling activates when the client asks
+        client.expect(rf"\[{side}\] activate {CONTROLLER} on /{side}/controller_manager now")
+        assert peer.switch(side, activate=(CONTROLLER,))
+    press_start(client)
+    for side in SIDES:
+        client.expect(rf"\[{side}\] deactivate {CONTROLLER} on /{side}/controller_manager now")
+    asked = time.monotonic()
+    time.sleep(1.5)  # the operator takes a moment
+    for side in SIDES:
+        assert peer.switch(side, deactivate=(CONTROLLER,))
+    client.expect(OUTCOME_PROMPT)
+    client.send("s")
+    client.expect(NOTE_PROMPT)
+    client.send("")
+    assert client.wait() == 0, client.tail()
+
+    for side in SIDES:
+        (deactivate,) = switches(robot, side, "deactivate")
+        assert len(switches(robot, side, "activate")) == 1  # the client never switched anything itself
+        cmds = commands(robot, side)
+        waiting = [c["mono"] for c in cmds if asked <= c["mono"] <= deactivate["mono"]]
+        assert len(waiting) >= 100, f"{side}: only {len(waiting)} commands while waiting for the operator"
+        gaps = np.diff([asked, *waiting, deactivate["mono"]])
+        assert gaps.max() < 0.05, f"{side}: {gaps.max() * 1000:.0f} ms gap while the controller was active"
+        after = [c for c in cmds if c["mono"] > deactivate["mono"]]
+        assert after, f"{side}: the stream ended before the controller read inactive"
