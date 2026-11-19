@@ -111,6 +111,15 @@ def _checkpoint_id(checkpoint_dir: str) -> str:
     return "/".join(parts[-2:])
 
 
+def _local_ip(hostname: str) -> str:
+    """The host's address for the startup log line, or "unresolved". A host without DNS (or a container without a
+    network) may not resolve its own name; the address is only informational, so that must not stop the server."""
+    try:
+        return socket.gethostbyname(hostname)
+    except OSError:
+        return "unresolved"
+
+
 def main(args: Args) -> None:
     policy = create_policy(args)
     # args.policy is Default() when serving a default policy, so read the checkpoint that
@@ -138,7 +147,7 @@ def main(args: Args) -> None:
         policy = _policy.PolicyRecorder(policy, "policy_records")
 
     hostname = socket.gethostname()
-    local_ip = socket.gethostbyname(hostname)
+    local_ip = _local_ip(hostname)
     logging.info("Creating server (host: %s, ip: %s)", hostname, local_ip)
 
     server = websocket_policy_server.WebsocketPolicyServer(
