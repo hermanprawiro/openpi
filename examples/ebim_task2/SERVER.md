@@ -108,6 +108,10 @@ which is what matters:
 $RC check-infer          # see README_ROBOT_CLIENT.md, section 4.2
 ```
 
+`$RC` is the robot client shortcut defined in [README_ROBOT_CLIENT.md, section 4.2](README_ROBOT_CLIENT.md#42-run-any-command)
+(`RC="docker compose -f examples/ebim_task2/compose.robot_client.yml run --rm robot-client"`, run from the openpi root on
+the robot laptop, with `POLICY_SERVER_HOST` set to this machine).
+
 Required: `check_infer: PASS`; the `server` row shows `layout munich16`, the config name and the checkpoint name
 (`<exp>/<step>`); the chunk shape is `(50, 16)`. Typical inference time on an L4 was about 0.5 to 0.6 s per request in an
 evaluator's measurement of a different pi0.5 (round trip 0.59 s); we expect similar or better after the warm-up.
