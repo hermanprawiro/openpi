@@ -946,3 +946,21 @@ def test_release_survives_a_closed_terminal(monkeypatch):
     assert rig.streamer.stops == 1
     for side in SIDES:
         assert rig.log.index(("operator_deactivate", side)) < rig.log.index(("stop",))
+
+
+def test_unreadable_state_at_release_is_retried_and_gets_the_tail():
+    """A side we did not activate whose state cannot be read at release is not assumed inactive: it is re-read while
+    the hold streams, and once it reads inactive the stream still outlives it by RELEASE_TAIL_S."""
+    rig = Rig(["takeover.mode=external"])
+    right = rig.cms["right"]
+    for side in SIDES:
+        rig.cms[side].operator_activates_on_list = 3
+    with rig.session():
+        for side in SIDES:
+            rig.cms[side].operator_deactivates_on_list = rig.cms[side].lists + 1
+        right.list_error = TimeoutError("list_controllers: no response")
+        rig.time.hooks.append(lambda dt: dt == 0.25 and setattr(right, "list_error", None))
+        n = len(rig.time.sleeps)
+    assert right.states[CTRL] == "inactive"
+    assert rig.time.sleeps[-1] == RELEASE_TAIL_S
+    assert RELEASE_TAIL_S in rig.time.sleeps[n:]

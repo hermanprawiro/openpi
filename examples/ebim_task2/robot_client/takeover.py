@@ -746,7 +746,7 @@ class _Release:
         for side in s.sides:
             ours = s.activated_by_us.get(side, False)
             done, state = self._settle(side, switch=ours)
-            seen_active |= state == "active" or ours
+            seen_active |= ours or not done  # it is, or may be, active: the stream outlives it by the tail
             if done:
                 continue
             if ours or state != "active":  # ours, or the state could not be read: retry for RELEASE_RETRY_S
@@ -795,10 +795,11 @@ class _Release:
     def _announce_still_active(self, side: str) -> None:
         arm = self.s.cfg.arms[side]
         bar = "!" * 100
-        _say(
-            f"{bar}\n! CONTROLLER STILL ACTIVE on {arm.controller_manager} ({arm.controller}) — deactivate it now "
-            "or press the E-stop.\n! The client keeps streaming the hold until it reads inactive. Press Enter once "
-            f"you have handled it.\n{bar}",
-            file=sys.stderr,
-            flush=True,
-        )
+        for line in (
+            bar,
+            f"! CONTROLLER STILL ACTIVE on {arm.controller_manager} ({arm.controller}) — deactivate it now or press "
+            "the E-stop.",
+            "! The client keeps streaming the hold until it reads inactive. Press Enter once you have handled it.",
+            bar,
+        ):
+            _say(line, file=sys.stderr, flush=True)
