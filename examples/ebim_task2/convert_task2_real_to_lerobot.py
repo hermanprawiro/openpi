@@ -32,9 +32,13 @@ import shutil
 import numpy as np
 from robot_client import layout
 from robot_client import preprocess
+from robot_client.config import SafetyConfig
 import tyro
 
-JOINT_LIMIT_RAD = 3.2
+# FR3 joint limits (rad) per arm, the client's own defaults: arm -> (q_min, q_max).
+JOINT_LIMITS = {
+    side: tuple(np.asarray(x, dtype=np.float64) for x in limits) for side, limits in SafetyConfig().joint_limits.items()
+}
 
 
 def align_frame_indices(frame_ts: np.ndarray, row_ts: np.ndarray, eps: float = 1e-3) -> tuple[np.ndarray, int]:
@@ -126,9 +130,15 @@ def validate_episode(images: dict[str, np.ndarray], state: np.ndarray, action: n
     for name, arr in (("state", state), ("action", action)):
         if not np.isfinite(arr).all():
             warnings.append(f"{name} has non-finite values")
-        joints = np.abs(np.asarray(arr)[..., list(layout.ARM_DIMS)])
-        if (joints > JOINT_LIMIT_RAD).any():
-            warnings.append(f"{name} has |joint| > {JOINT_LIMIT_RAD} rad (max {np.nanmax(joints):.2f})")
+        for side, (q_min, q_max) in JOINT_LIMITS.items():
+            joints = np.asarray(arr, dtype=np.float64)[..., layout.ARM_SLICES[side]]
+            outside = (joints < q_min) | (joints > q_max)
+            for j in np.flatnonzero(outside.reshape(-1, len(q_min)).any(axis=0)):
+                values = joints[..., j]
+                warnings.append(
+                    f"{name} {side} joint {j + 1} outside the FR3 joint limits [{q_min[j]}, {q_max[j]}] rad "
+                    f"(range {np.nanmin(values):.3f}..{np.nanmax(values):.3f})"
+                )
     width = np.asarray(action)[..., list(layout.GRIPPER_INDEX.values())]
     if ((width < 0) | (width > 1)).any():
         warnings.append("action gripper width outside [0, 1]")

@@ -75,9 +75,14 @@ def test_holdout_split_deterministic_and_disjoint():
     assert len(a[0]) == 90
 
 
+# A pose inside the FR3 limits on every joint (joint 4 must be < -0.1518, joint 6 > 0.5445), grippers 0 / 1.
+_POSE16 = [0.0, 0.0, 0.0, -1.5, 0.0, 1.8, 0.0, 0.0, 0.0, 0.0, 0.0, -1.5, 0.0, 1.8, 0.0, 1.0]
+
+
 def _good_episode(n=4):
     images = {"head": np.full((n, 8, 8, 3), 5, np.uint8), "wrist": np.full((n, 8, 8, 3), 5, np.uint8)}
-    return images, np.zeros((n, 16), np.float32), np.zeros((n, 16), np.float32)
+    pose = np.tile(np.asarray(_POSE16, np.float32), (n, 1))
+    return images, pose.copy(), pose.copy()
 
 
 def test_validate_episode_clean():
@@ -92,8 +97,19 @@ def test_validate_episode_flags_problems():
     action[1, 2] = 3.5
     action[1, 15] = 1.5
     msgs = " | ".join(convert.validate_episode(images, state, action))
-    for needle in ("head", "black", "non-finite", "3.2", "gripper"):
+    for needle in ("head", "black", "non-finite", "FR3 joint limits", "joint 3", "gripper"):
         assert needle in msgs
+
+
+def test_validate_episode_uses_per_joint_fr3_limits():
+    """Right joint 6 up to 4.5169 rad is legal on the FR3 (a flat 3.2 rad bound flagged it: ruling R5)."""
+    images, state, action = _good_episode()
+    state[:, 13] = 4.4  # right joint 6
+    assert convert.validate_episode(images, state, action) == []
+    state[0, 11] = 0.0  # right joint 4 above its q_max -0.1518
+    msgs = " | ".join(convert.validate_episode(images, state, action))
+    assert "state" in msgs
+    assert "right joint 4" in msgs
 
 
 def test_align_with_no_frames_raises():
