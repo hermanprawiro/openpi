@@ -25,6 +25,11 @@ services:
     environment:
       - OPENPI_DATA_HOME=/openpi_assets
       - IS_DOCKER=true
+      # Start without network: the image already holds every runtime dependency (`uv sync --no-install-project
+      # --no-dev` at build time). Without these two, `uv run` re-syncs at every new container start (installs the
+      # project and the dev group from PyPI) and fails offline. The project itself comes from the bind-mounted source.
+      - UV_NO_SYNC=1
+      - PYTHONPATH=/app/src
       - SERVER_ARGS=--port ${PORT:-8000} policy:checkpoint --policy.config=${POLICY_CONFIG:?set POLICY_CONFIG to the training config name} --policy.dir=/ckpt
     deploy:
       resources:

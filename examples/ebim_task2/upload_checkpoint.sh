@@ -2,20 +2,21 @@
 # Upload one trained step to the Hugging Face checkpoint repo, mirroring openpi's on-disk layout
 # <config>/<exp>/<step>/{params,assets,holdout_eval.json}. Never uploads train_state/.
 #
-#   examples/ebim_task2/upload_checkpoint.sh <config> <exp> <step> [--repo Ching-Yeh/ebim-task2] [--dry-run]
+#   examples/ebim_task2/upload_checkpoint.sh <config> <exp> <step> [--repo hermanprawiro/ebim-task2-real] [--dry-run]
 #
-# Refuses unless params/, assets/ and holdout_eval.json exist (run eval_real_holdout.py first).
+# Refuses unless params/, assets/ and holdout_eval.json exist (run eval_real_holdout.py first). A missing repo is
+# created as a private model repo. Needs HF_TOKEN (or huggingface-cli login) with write access.
 # CHECKPOINTS_DIR overrides the checkpoint root (default: <repo>/checkpoints).
 set -euo pipefail
 
-repo="Ching-Yeh/ebim-task2"
+repo="hermanprawiro/ebim-task2-real"
 dry_run=0
 pos=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --repo) repo="${2:?--repo needs a value}"; shift 2 ;;
     --dry-run) dry_run=1; shift ;;
-    -h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "error: unknown option $1" >&2; exit 2 ;;
     *) pos+=("$1"); shift ;;
   esac
@@ -55,9 +56,11 @@ run() {
 hf=(huggingface-cli)
 if ! command -v huggingface-cli >/dev/null; then hf=(uv run huggingface-cli); fi
 
-run "${hf[@]}" upload "$repo" "$ckpt/params" "$dest/params"
-run "${hf[@]}" upload "$repo" "$ckpt/assets" "$dest/assets"
-run "${hf[@]}" upload "$repo" "$ckpt/holdout_eval.json" "$dest/holdout_eval.json"
+# --private applies only when the upload creates the repo; an existing repo keeps its visibility.
+up=(upload --repo-type model --private "$repo")
+run "${hf[@]}" "${up[@]}" "$ckpt/params" "$dest/params"
+run "${hf[@]}" "${up[@]}" "$ckpt/assets" "$dest/assets"
+run "${hf[@]}" "${up[@]}" "$ckpt/holdout_eval.json" "$dest/holdout_eval.json"
 
 if [[ $dry_run -eq 1 ]]; then verb="Would upload"; else verb="Uploaded"; fi
 cat <<MSG
