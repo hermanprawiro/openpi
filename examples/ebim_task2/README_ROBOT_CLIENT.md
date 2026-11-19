@@ -70,7 +70,7 @@ check-obs  ->  check-infer  ->  check-motion --arm right  ->  check-motion --arm
 | | `q` | End the episode (the arms hold, then the controllers are released) |
 | | Ctrl-C | Emergency release: the client stops and releases what it activated |
 | `Outcome?` prompt | `s` / `f` / `x`, then Enter | Success / fail / skip. Then an optional one-line note (type it, Enter; or just Enter) |
-| `CONTROLLER STILL ACTIVE ...` message during a release | Enter (single key) | Only after you deactivated the controller with your tooling or pressed the E-stop: the client stops holding and exits 5 |
+| `CONTROLLER STILL ACTIVE ...` message during a release | Enter (single key) | Only after you deactivated the controller with your tooling or pressed the E-stop: the client stops holding that arm and exits 5. The Enter answers only the arm(s) named in the messages shown so far; an arm still waiting for its deactivation keeps its hold and gets its own message, which needs its own Enter. Do **not** `docker stop` the client here (section 11) |
 
 Keys you typed before a prompt appeared are thrown away, so an early Enter cannot start anything.
 Pressing Ctrl-C twice does nothing extra: after the first one the client finishes its release
@@ -86,7 +86,7 @@ Pressing Ctrl-C twice does nothing extra: after the first one the client finishe
 | 3 | `FREEZE`: the episode was stopped for safety and the controllers were released |
 | 4 | Configuration or usage error (`CONFIG ERROR:` or an argument error) |
 | 5 | `CONTROLLER STILL ACTIVE`: a controller could not be confirmed inactive after the release and you confirmed with Enter that you handled it. Make sure it is deactivated (section 11) before anything else |
-| 130 | You pressed Ctrl-C (or the container got SIGTERM, or the terminal was closed: SIGHUP). Everything the client activated was released first |
+| 130 | You pressed Ctrl-C (or the container got SIGTERM, or the terminal was closed: SIGHUP). Everything the client activated was released first. During a release (including a `CONTROLLER STILL ACTIVE` hold) these signals are ignored: the release always finishes first |
 
 **Facts worth knowing**
 
@@ -488,8 +488,8 @@ check fails (exit 2), `warn` = does not fail anything, `info` = just information
 | `--run-name must match ^[A-Za-z0-9][A-Za-z0-9._-]*$ (one path component), got ...` | Invalid run name | Use letters, digits, `.`, `_`, `-` only |
 | `cannot create the run directory ... (...); mount out_dir or set --set out_dir=...` | The output folder cannot be created (permissions, missing mount) | Fix `OUT_DIR` on the host; do not change `out_dir` inside the container unless you also mount it |
 | `python -m robot_client ...: error: ...`; `--joint: must be 'all' or a joint number 1..7, got ...`; `--delta: must be in (0, 0.2] rad, got ...`; `run: error: --episodes must be >= 1, got ...`; `check-infer: error: --n must be >= 1, got ...` | Wrong command-line arguments (exit 4) | Correct the argument; `$RC <command> --help` |
-| `REFUSED: RMW_IMPLEMENTATION is ... but ros.rmw is ...; set the environment variable (the compose file passes ROS_DOMAIN_ID through: ROS_DOMAIN_ID=<n> docker compose ... run --rm robot-client ...) or the ros section of the site YAML` | The container's RMW differs from the YAML. `run`, `prepare` and `check-motion` refuse; the other commands only print `WARNING:` | Leave the image's `rmw_fastrtps_cpp` and the YAML `ros.rmw` equal; do not set `RMW_IMPLEMENTATION` |
-| `REFUSED: ROS_DOMAIN_ID is ... but ros.domain_id is ...` / `ROS_DOMAIN_ID ... is not an integer (ros.domain_id is ...)` | The domain of the container and the YAML differ | Make them equal. The robot is on domain 0. The container gets `ROS_DOMAIN_ID` from your shell (default 0): `export ROS_DOMAIN_ID=<n>` and set `ros.domain_id: <n>` in the YAML |
+| `REFUSED: RMW_IMPLEMENTATION is ... but ros.rmw is ...; set the environment variable or the ros section of the site YAML` | The container's RMW differs from the YAML. `run`, `prepare` and `check-motion` refuse; the other commands only print `WARNING:` | Leave the image's `rmw_fastrtps_cpp` and the YAML `ros.rmw` equal; do not set `RMW_IMPLEMENTATION` |
+| `REFUSED: ROS_DOMAIN_ID is ... but ros.domain_id is ...; set the environment variable (the compose file passes ROS_DOMAIN_ID through: ROS_DOMAIN_ID=<n> docker compose ... run --rm robot-client ...) or the ros section of the site YAML` / `ROS_DOMAIN_ID ... is not an integer (ros.domain_id is ...)` (same hint) | The domain of the container and the YAML differ | Make them equal. The robot is on domain 0. The container gets `ROS_DOMAIN_ID` from your shell (default 0): `export ROS_DOMAIN_ID=<n>` and set `ros.domain_id: <n>` in the YAML |
 | `WARNING: FASTRTPS_DEFAULT_PROFILES_FILE=... is not a readable file in the container` | The profile path you set does not exist inside the container | Mount the file (section 4.4) or set it to empty |
 | `REFUSED: ROS 2 Python packages are not importable (...); run the client in its container (or source /opt/ros/humble/setup.bash and the franka message workspace)` | The client was started outside its Docker image | Use `$RC ...` |
 | a banner of `*` lines reading `POLICY_SERVER_HOST is not set: connecting to localhost:8000.` and `If the policy server runs on another machine, set POLICY_SERVER_HOST (and POLICY_SERVER_PORT / POLICY_SERVER_API_KEY) and rerun.` | The server address is not set | `export POLICY_SERVER_HOST=<ip>` and rerun |
@@ -639,7 +639,9 @@ Other lines during a run:
 |---|---|---|
 | `Released.` | Every controller the client streamed to reads inactive (the client deactivated the ones it activated, you deactivated the others when asked) and the stream stopped | Nothing |
 | `[<side>] deactivate <controller> on <cm> now (the client keeps streaming the hold until it reads inactive; waiting up to 60 s)` | The release reached a controller the client did not activate (`takeover.mode: external`, or `takeover.accept_active`). The arm keeps holding | Deactivate it with your tooling now |
-| A block of `!` lines: `CONTROLLER STILL ACTIVE on <cm> (<controller>) — deactivate it now or press the E-stop.` / `The client keeps streaming the hold until it reads inactive. Press Enter once you have handled it.` | The client retried its own deactivation for 5 s (or waited 60 s for yours) and the controller still reads active (or its state cannot be read). The arm is still held by the stream | Deactivate it with your tooling (from another terminal: `docker compose -f examples/ebim_task2/compose.robot_client.yml run --rm robot-client release --arm <side>`) or press the E-stop. The client stops by itself once the state reads inactive; press Enter only when you have handled it |
+| `[<side>] deactivate <controller> on <cm> now (the command stream is unhealthy (<reason>): the client may not be holding the arm; waiting up to 60 s for it to read inactive)` | Same, but our command stream has failed (the release follows a `FREEZE` for `command streamer unhealthy`): the arm may be holding its last command or nothing | Deactivate it with your tooling now; **keep your hand on the E-stop** |
+| A block of `!` lines: `CONTROLLER STILL ACTIVE on <cm> (<controller>) — deactivate it now or press the E-stop.` / `The client keeps streaming the hold until it reads inactive. Press Enter once you have handled it.` | The client retried its own deactivation for 5 s (or waited 60 s for yours) and the controller still reads active (or its state cannot be read). The arm is still held by the stream | Deactivate it with your tooling (from another terminal: `docker compose -f examples/ebim_task2/compose.robot_client.yml run --rm robot-client release --arm <side>`) or press the E-stop. The client stops by itself once the state reads inactive; press Enter only when you have handled it. Do **not** `docker stop` this client: it ignores SIGTERM while it holds, so Docker kills it after 10 s and the stream stops with the controller still active |
+| The same block with `The command stream is unhealthy (<reason>): the client may NOT be holding the arm. Press Enter once you have handled it.` as its second line | As above, but our command stream has failed, so the arm may not be held | Same; press the E-stop if the arm moves |
 | ``CONTROLLER STILL ACTIVE: <controller> on <cm> may still be active after the release (not confirmed inactive); the command stream has stopped. Deactivate it with your tooling (or `release --arm <side>`) or press the E-stop`` (exit 5) | You pressed Enter at the message above while the controller did not read inactive | Make sure it is deactivated (section 11) before you run anything else |
 | log: `reading the operator's confirmation failed` (with a traceback) | The terminal could not be read while the client waited for your Enter | It keeps holding until the controller reads inactive; deactivate it with your tooling |
 | `releasing — wait, or use the E-stop` | You sent another interrupt during a release | Wait a few seconds. Use the E-stop if the arm is doing something wrong |
@@ -747,3 +749,10 @@ what it did per arm (`<side>: <controller> on <cm> deactivated (now inactive)`).
 deactivated; exit code 2 prints why not. In that case use the robot's own tooling or the E-stop. A normal Ctrl-C or
 `docker stop` does not need this: the client releases on its own, and prints `Interrupted. Everything this client
 activated has been released`.
+
+**Not during a `CONTROLLER STILL ACTIVE` hold.** While that block is on screen the client is in its release and ignores
+Ctrl-C and SIGTERM (it prints `releasing — wait, or use the E-stop`). `docker stop` then waits 10 s and kills the client
+with SIGKILL, so the hold stream stops while the controller is still active. Instead, leave the client running and, from
+a second terminal, run the `release --arm <side>` command above for the arm it names (or deactivate it with your own
+tooling, or press the E-stop). The client sees the controller inactive and finishes by itself; press Enter in its
+terminal only if it keeps waiting after you handled it.

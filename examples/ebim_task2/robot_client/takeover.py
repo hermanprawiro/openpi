@@ -753,29 +753,42 @@ class _Release:
                 pending[side] = (ours, t0 + RELEASE_RETRY_S)
             else:  # active, not activated by us: the operator deactivates it
                 arm = s.cfg.arms[side]
-                _say(
-                    f"[{side}] deactivate {arm.controller} on {arm.controller_manager} now (the client keeps "
-                    f"streaming the hold until it reads inactive; waiting up to {EXTERNAL_WAIT_S:.0f} s)",
-                    flush=True,
-                )
+                why = self._unhealthy()
+                if why is None:
+                    _say(
+                        f"[{side}] deactivate {arm.controller} on {arm.controller_manager} now (the client keeps "
+                        f"streaming the hold until it reads inactive; waiting up to {EXTERNAL_WAIT_S:.0f} s)",
+                        flush=True,
+                    )
+                else:
+                    _say(
+                        f"[{side}] deactivate {arm.controller} on {arm.controller_manager} now (the command stream is "
+                        f"unhealthy ({why}): the client may not be holding the arm; waiting up to "
+                        f"{EXTERNAL_WAIT_S:.0f} s for it to read inactive)",
+                        flush=True,
+                    )
                 pending[side] = (False, t0 + EXTERNAL_WAIT_S)
-        # 3. keep holding until every pending controller reads not active
+        # 3. keep holding until every pending controller reads not active. An Enter answers the loud message for the
+        # sides it was shown for; a side not announced yet keeps waiting (and gets its own message and Enter).
         loud: set[str] = set()
+        still_active: list[str] = []
         while pending:
             self._sleep(RELEASE_POLL_S)
             for side, (ours, give_up) in list(pending.items()):
                 done, _ = self._settle(side, switch=ours and side not in loud)
                 if done:
                     del pending[side]
+                    loud.discard(side)
                 elif side not in loud and s.clock() >= give_up - _EPS:
                     loud.add(side)
                     self._announce_still_active(side)
-            if pending and loud and self._acked():
-                for side in list(pending):  # the operator says it is handled: one last look
-                    if self._settle(side, switch=False)[0]:
-                        del pending[side]
-                self.still_active = [side for side in s.sides if side in pending]
-                break
+            if loud and self._acked():
+                for side in sorted(loud):  # the operator says it is handled: one last look
+                    del pending[side]
+                    if not self._settle(side, switch=False)[0]:
+                        still_active.append(side)
+                loud.clear()
+        self.still_active = [side for side in s.sides if side in still_active]
         # 4. keep streaming a little after the last deactivation (a controller never sees the stream end first)
         if seen_active:
             self._sleep(RELEASE_TAIL_S)
@@ -792,14 +805,33 @@ class _Release:
             logger.exception("reading the operator's confirmation failed")
             return False
 
+    def _unhealthy(self) -> str | None:
+        """None while the command stream is healthy (it holds the arms), else why not."""
+        try:
+            if self.s.streamer.healthy():
+                return None
+            return self.s.streamer.fault or "no recent publish"
+        except Exception as e:  # diagnostics only
+            return f"health unknown: {type(e).__name__}: {e}"
+
     def _announce_still_active(self, side: str) -> None:
         arm = self.s.cfg.arms[side]
         bar = "!" * 100
+        why = self._unhealthy()
+        if why is None:
+            holding = (
+                "! The client keeps streaming the hold until it reads inactive. Press Enter once you have handled it."
+            )
+        else:
+            holding = (
+                f"! The command stream is unhealthy ({why}): the client may NOT be holding the arm. Press Enter once "
+                "you have handled it."
+            )
         for line in (
             bar,
             f"! CONTROLLER STILL ACTIVE on {arm.controller_manager} ({arm.controller}) — deactivate it now or press "
             "the E-stop.",
-            "! The client keeps streaming the hold until it reads inactive. Press Enter once you have handled it.",
+            holding,
             bar,
         ):
             _say(line, file=sys.stderr, flush=True)

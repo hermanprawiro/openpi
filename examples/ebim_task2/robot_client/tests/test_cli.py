@@ -358,7 +358,20 @@ def test_run_refuses_a_ros_env_mismatch(tmp_path, monkeypatch, capsys, stub_serv
     world = World(monkeypatch, ScriptedConsole())
     env = server_env(server.port) | {"ROS_DOMAIN_ID": "7"}
     assert cli.main(["run", *base_args(tmp_path)], env=env) == 2
-    assert "ROS_DOMAIN_ID is 7" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "ROS_DOMAIN_ID is 7" in err
+    assert "the compose file passes ROS_DOMAIN_ID through" in err
+    assert world.log == []
+
+
+def test_ros_env_refusal_without_a_domain_mismatch_has_no_domain_hint(tmp_path, monkeypatch, capsys, stub_server):
+    server = stub_server(layout_id="munich16", latency_s=0.01)
+    world = World(monkeypatch, ScriptedConsole())
+    env = server_env(server.port) | {"RMW_IMPLEMENTATION": "rmw_cyclonedds_cpp"}
+    assert cli.main(["run", *base_args(tmp_path)], env=env) == 2
+    err = capsys.readouterr().err
+    assert "REFUSED: RMW_IMPLEMENTATION is 'rmw_cyclonedds_cpp'" in err
+    assert "ROS_DOMAIN_ID" not in err
     assert world.log == []
 
 
@@ -626,6 +639,16 @@ def test_operator_ack_discards_type_ahead():
     assert ack() is True
 
 
+def test_operator_ack_starts_over_after_an_enter():
+    """A later CONTROLLER STILL ACTIVE message (another arm) needs its own Enter typed after it was shown."""
+    console = ScriptedConsole(keys=[ENTER, ENTER, ENTER])
+    ack = cli._operator_ack(console)  # noqa: SLF001
+    assert ack() is False
+    assert ack() is True
+    assert ack() is False  # the next message: type-ahead discarded again
+    assert console.discards == 2
+
+
 @pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
 def test_signal_guard_turns_signals_into_one_interrupt(sig, capfd):
     """SIGHUP too: python is PID 1 in the container, so an unhandled SIGHUP (closed terminal) would be ignored."""
@@ -639,6 +662,18 @@ def test_signal_guard_turns_signals_into_one_interrupt(sig, capfd):
     finally:
         guard.restore()
     assert signal.getsignal(signal.SIGHUP) is not guard._handle  # noqa: SLF001
+
+
+def test_signal_guard_survives_a_hung_up_terminal(monkeypatch):
+    """SIGHUP closes the terminal: writing the releasing message then fails (EIO); that must not abort the release."""
+    guard = cli.SignalGuard()
+
+    def eio(fd, data):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(cli.os, "write", eio)
+    with guard.releasing():
+        guard._handle(signal.SIGHUP, None)  # noqa: SLF001 - no exception
 
 
 # ---- release ----

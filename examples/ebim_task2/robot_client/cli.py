@@ -190,7 +190,8 @@ class SignalGuard:
 
     def _handle(self, signum, frame) -> None:
         if self._releasing or self._interrupted:
-            os.write(2, f"\n{RELEASING_MESSAGE}\n".encode())  # no print(): not re-entrant in a handler
+            with contextlib.suppress(OSError):  # a hung-up terminal (EIO) must not abort the release
+                os.write(2, f"\n{RELEASING_MESSAGE}\n".encode())  # no print(): not re-entrant in a handler
             return
         self._interrupted = True
         raise KeyboardInterrupt(signal.Signals(signum).name)
@@ -219,7 +220,8 @@ class GuardedSession(Session):
 
 def _operator_ack(console) -> Callable[[], bool]:
     """The release's CONTROLLER STILL ACTIVE wait: True once the operator pressed Enter after the message was shown
-    (the first call discards keys typed before it, so a type-ahead Enter never confirms)."""
+    (the first call discards keys typed before it, so a type-ahead Enter never confirms). After a True the next call
+    starts over: a later message for another arm needs its own Enter."""
     shown = False
 
     def ack() -> bool:
@@ -228,7 +230,10 @@ def _operator_ack(console) -> Callable[[], bool]:
             shown = True
             console.discard_pending()
             return False
-        return console.poll() == ENTER
+        if console.poll() == ENTER:
+            shown = False
+            return True
+        return False
 
     return ack
 
@@ -507,9 +512,14 @@ def _ros_env_ok(ctx: Context, *, refuse: bool) -> bool:
     problems = check_ros_env(ctx.cfg, ctx.env)
     for problem in problems:
         label = "REFUSED" if refuse else "WARNING"
+        hint = (
+            " (the compose file passes ROS_DOMAIN_ID through: ROS_DOMAIN_ID=<n> docker compose ... run --rm "
+            "robot-client ...)"
+            if problem.startswith("ROS_DOMAIN_ID")
+            else ""
+        )
         print(
-            f"{label}: {problem}; set the environment variable (the compose file passes ROS_DOMAIN_ID through: "
-            "ROS_DOMAIN_ID=<n> docker compose ... run --rm robot-client ...) or the ros section of the site YAML",
+            f"{label}: {problem}; set the environment variable{hint} or the ros section of the site YAML",
             file=sys.stderr,
         )
     return not problems

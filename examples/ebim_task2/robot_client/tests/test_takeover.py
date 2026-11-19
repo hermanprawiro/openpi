@@ -964,3 +964,62 @@ def test_unreadable_state_at_release_is_retried_and_gets_the_tail():
     assert right.states[CTRL] == "inactive"
     assert rig.time.sleeps[-1] == RELEASE_TAIL_S
     assert RELEASE_TAIL_S in rig.time.sleeps[n:]
+
+
+def test_enter_at_the_loud_hold_drops_only_the_announced_side(capsys):
+    """Enter answers the loud CONTROLLER STILL ACTIVE message for the sides it was shown for. A side still waiting
+    for the operator (never announced) keeps its hold until it reads inactive."""
+    rig = Rig(["takeover.accept_active=true"])
+    left, right = rig.cms["left"], rig.cms["right"]
+    right.states[CTRL] = "active"  # already active: the operator deactivates it (up to EXTERNAL_WAIT_S)
+    left.refuse_deactivate = 10**6  # ours, never deactivates: loud after RELEASE_RETRY_S
+    rig.ack_after = 3
+
+    def operator(dt):  # deactivates the right arm well after the Enter for the left one
+        if rig.acks >= 3 and right.operator_deactivates_on_list is None and right.states[CTRL] == "active":
+            right.operator_deactivates_on_list = right.lists + 20
+
+    rig.time.hooks.append(operator)
+    with pytest.raises(ControllerStillActive) as excinfo, rig.session():
+        pass
+    err = capsys.readouterr().err
+    assert "CONTROLLER STILL ACTIVE on /left/controller_manager" in err
+    assert "CONTROLLER STILL ACTIVE on /right/controller_manager" not in err
+    assert "/right/" not in str(excinfo.value)
+    assert dict(rig.recorder.events)["released"]["still_active"] == ["left"]
+    assert right.states[CTRL] == "inactive"
+    seen = rig.log.index(("operator_deactivate", "right"))
+    stop = rig.log.index(("stop",))
+    assert len(rig.pubs("right", rig.log[seen:stop])) >= round(RELEASE_TAIL_S * 100) - 1  # held until it read inactive
+    assert rig.acks == 3  # no further Enter was asked for
+
+
+@pytest.mark.parametrize("healthy", [True, False])
+def test_release_messages_say_whether_the_stream_still_holds(healthy, capsys):
+    """The loud and the deactivate-now messages claim the client is streaming the hold only while the stream is
+    healthy."""
+    rig = Rig(["takeover.accept_active=true"])
+    rig.cms["right"].states[CTRL] = "active"
+    rig.cms["left"].refuse_deactivate = 10**6
+    rig.ack_after = 1  # Enter answers the left side's loud message ...
+    rig.cms["right"].operator_deactivates_on_list = 40  # ... the operator deactivates the right one meanwhile
+
+    def body():
+        with rig.session():
+            if not healthy:
+                rig.streamer.fault = "publish failed for left: OSError: boom"
+
+    with pytest.raises(ControllerStillActive):
+        body()
+    out, err = capsys.readouterr()
+    keeps = "keeps streaming the hold until it reads inactive"
+    if healthy:
+        assert keeps in out
+        assert keeps in err
+        assert "unhealthy" not in out + err
+    else:
+        assert keeps not in out + err
+        assert "the command stream is unhealthy (publish failed for left: OSError: boom)" in out
+        assert "may not be holding the arm" in out
+        assert "The command stream is unhealthy (publish failed for left: OSError: boom)" in err
+        assert "may NOT be holding the arm" in err
