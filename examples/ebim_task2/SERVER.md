@@ -26,25 +26,28 @@ the client refuses a server whose layout or prompt does not match.
 
 ## 2. Get the checkpoint
 
-The checkpoints are in the Hugging Face model repository `hermanprawiro/ebim-task2-real`, laid out as
+The checkpoints are in the **public** Hugging Face model repository
+[`hermanprawiro/ebim-task2-real`](https://huggingface.co/hermanprawiro/ebim-task2-real), laid out as
 `<config>/<exp>/<step>/{params,assets,holdout_eval.json}` (the same layout as openpi's own `checkpoints/` folder; no
-`train_state/`). **The repository is private unless its owner has made it public.** While it is private you need a
-Hugging Face access token that we gave you read access for: `export HF_TOKEN=<token>` (or `huggingface-cli login`)
-before downloading; without it the download fails with `401` / `Repository Not Found`. From the root of the openpi
-checkout:
+`train_state/`). No account or token is needed. From the root of the openpi checkout:
 
 ```bash
-pip install -U "huggingface_hub[cli]"      # once; newer versions call the command `hf`
-huggingface-cli download hermanprawiro/ebim-task2-real \
+pip install -U huggingface_hub      # once; provides the `hf` command
+hf download hermanprawiro/ebim-task2-real \
     --include "<config>/<exp>/<step>/*" --local-dir checkpoints
 ```
 
-The shipped checkpoint (6.3 GB):
+The shipped checkpoint (about 6 GB; 78 s on our connection):
 
 ```bash
-huggingface-cli download hermanprawiro/ebim-task2-real \
+hf download hermanprawiro/ebim-task2-real \
     --include "pi05_lora_ebim_task2_munich_real/munich_v1/12500/*" --local-dir checkpoints
 ```
+
+`hf` prints `Warning: You are sending unauthenticated requests ...`; that is expected and harmless. With a
+`huggingface_hub` older than 0.34 the command is called `huggingface-cli download`, with the same arguments; with
+version 1.0 or newer only `hf` exists. Verified with `huggingface_hub` 2.4.0 from a fresh clone and no credentials:
+the files are byte-identical to ours, and the server loaded them and reported `checkpoint munich_v1/12500`.
 
 The checkpoint directory is then `checkpoints/<config>/<exp>/<step>`. Check that it contains `params/` and `assets/`,
 and that `assets/ebim/task2_munich_real/norm_stats.json` exists. The `assets` folder holds the normalisation statistics
@@ -179,7 +182,8 @@ reaches `Warmup done` with **no network at all** (container run with `network_mo
 | Symptom | Cause | Fix |
 |---|---|---|
 | `error: checkpoint dir not found: ...` / `error: .../params is missing (point at the step dir, e.g. .../<exp>/30000)` (from `serve_munich.sh`) | Wrong `<ckpt_dir>`, or an incomplete download | Point at the step directory that contains `params/` and `assets/`; download again |
-| `401 Client Error` / `Repository Not Found` while downloading | The repository is private and no token (or one without access) is set | `export HF_TOKEN=<token we gave you>` or `huggingface-cli login`, then download again |
+| `huggingface-cli: command not found`, or `hf: command not found` | The CLI name depends on the `huggingface_hub` version | `pip install -U huggingface_hub` and use `hf download ...` (older versions: `huggingface-cli download ...`, same arguments) |
+| `401 Client Error` / `Repository Not Found` while downloading | A typo in the repository name or path, or an invalid token in `HF_TOKEN` / a stale `hf auth login` | Check the name (`hermanprawiro/ebim-task2-real`) and the path; the repository is public, so `unset HF_TOKEN` and try again |
 | `required variable CKPT_DIR is missing a value` / `... POLICY_CONFIG ...` | Compose was run without the variables | Use `serve_munich.sh`, or set both |
 | Errors about missing or mismatching parameters while loading, or a shape error | `<config>` does not match the checkpoint (LoRA vs full fine-tune), or the checkpoint is not a Munich one | Use the config named by the checkpoint's first directory level |
 | `FileNotFoundError` for `norm_stats.json` | The `assets/` folder is missing or in the wrong place | Download the whole `<config>/<exp>/<step>/*`; `assets/ebim/task2_munich_real/norm_stats.json` must exist |

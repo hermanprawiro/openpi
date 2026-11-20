@@ -5,7 +5,8 @@
 #   examples/ebim_task2/upload_checkpoint.sh <config> <exp> <step> [--repo hermanprawiro/ebim-task2-real] [--dry-run]
 #
 # Refuses unless params/, assets/ and holdout_eval.json exist (run eval_real_holdout.py first). A missing repo is
-# created as a private model repo. Needs HF_TOKEN (or huggingface-cli login) with write access.
+# created as a private model repo (an existing repo keeps its visibility; hermanprawiro/ebim-task2-real is public).
+# Needs HF_TOKEN (or `hf auth login`) with write access.
 # CHECKPOINTS_DIR overrides the checkpoint root (default: <repo>/checkpoints).
 set -euo pipefail
 
@@ -52,9 +53,11 @@ run() {
   echo "+ $*"
   if [[ $dry_run -eq 0 ]]; then "$@"; fi
 }
-# Plain huggingface-cli if it is on PATH, otherwise the one in the repo's uv environment.
-hf=(huggingface-cli)
-if ! command -v huggingface-cli >/dev/null; then hf=(uv run huggingface-cli); fi
+# The Hugging Face CLI: `hf` (huggingface_hub >= 0.34; the only name in 1.x and later), else the older
+# `huggingface-cli` (same arguments), else the one in the repo's uv environment.
+if command -v hf >/dev/null; then hf=(hf)
+elif command -v huggingface-cli >/dev/null; then hf=(huggingface-cli)
+else hf=(uv run huggingface-cli); fi
 
 # --private applies only when the upload creates the repo; an existing repo keeps its visibility.
 up=(upload --repo-type model --private "$repo")
@@ -66,6 +69,6 @@ if [[ $dry_run -eq 1 ]]; then verb="Would upload"; else verb="Uploaded"; fi
 cat <<MSG
 
 $verb $dest to $repo. To serve it on another machine:
-  huggingface-cli download $repo --include "$dest/*" --local-dir checkpoints
+  hf download $repo --include "$dest/*" --local-dir checkpoints
   examples/ebim_task2/serve_munich.sh $config checkpoints/$dest
 MSG

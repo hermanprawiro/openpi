@@ -157,15 +157,24 @@ examples/ebim_task2/upload_checkpoint.sh pi05_ebim_task2_munich_real munich_v1 3
 
 Uploads `params/`, `assets/` and `holdout_eval.json` to the HF model repo `hermanprawiro/ebim-task2-real` under
 `<config>/<exp>/<step>/` (same layout as on disk; `--repo` selects another repo, `--dry-run` only prints the commands).
-A missing repo is created **private**. It refuses when `params/`, `assets/` (with a `norm_stats.json`) or
-`holdout_eval.json` is missing, and never uploads `train_state/`. You need `HF_TOKEN` (or `huggingface-cli login`) with
+`hermanprawiro/ebim-task2-real` is **public**, so an upload there is published at once. A missing repo (another
+`--repo`) is created **private**; an existing repo keeps its visibility. It refuses when `params/`, `assets/` (with a
+`norm_stats.json`) or `holdout_eval.json` is missing, and never uploads `train_state/`. It uses `hf` if that is on
+`PATH`, else `huggingface-cli`, else the repo's `uv run huggingface-cli`. You need `HF_TOKEN` (or `hf auth login`) with
 write access first. Export only the token: `.env`'s `HF_HOME=~/...` is not tilde-expanded by `uv run --env-file`, so
 `uv run --env-file .env ...` would put the upload cache in a directory literally named `~` and the Xet upload fails
-(`MerkleDB Shard error: File I/O error`). The script prints the matching download and serve commands. To fetch a step
-on another machine (the repo is private unless its owner made it public: set `HF_TOKEN` first):
+(`MerkleDB Shard error: File I/O error`). For example, with only the token from `.env` exported:
 
 ```bash
-huggingface-cli download hermanprawiro/ebim-task2-real --include "pi05_ebim_task2_munich_real/munich_v1/30000/*" --local-dir checkpoints
+HF_TOKEN=$(grep '^HF_TOKEN=' .env | cut -d= -f2- | tr -d '"') \
+  examples/ebim_task2/upload_checkpoint.sh pi05_ebim_task2_munich_real munich_v1 30000
+```
+
+The script prints the matching download and serve commands. To fetch a step on another machine (no token needed;
+`pip install -U huggingface_hub` provides `hf`; older versions call it `huggingface-cli`):
+
+```bash
+hf download hermanprawiro/ebim-task2-real --include "pi05_ebim_task2_munich_real/munich_v1/30000/*" --local-dir checkpoints
 ```
 
 The LoRA stand-in shipped for the Munich session is `pi05_lora_ebim_task2_munich_real/munich_v1/12500`.

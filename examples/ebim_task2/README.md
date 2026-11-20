@@ -18,6 +18,9 @@ described in the [technical reference](#technical-reference) below):
 The walkthrough below uses the default pi0.5 LoRA config; for the alternatives just swap the
 config name (everything else is identical).
 
+For the **real robot** (Munich testbed): training on the real data is in [TRAINING_REAL.md](TRAINING_REAL.md), and
+deploying the trained policy on the robot is in [DEPLOY_REAL.md](DEPLOY_REAL.md).
+
 ## Fine-tuning walkthrough
 
 Starting from a fresh clone of this repo:
