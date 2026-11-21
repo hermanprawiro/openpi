@@ -370,9 +370,17 @@ class LeRobotEbimTask2DataConfig(DataConfigFactory):
     use_delta_actions: bool = True
     # Number of real action dims returned to the client (20 sim layout, 16 Munich real-robot layout).
     action_dim: int = ebim_task2_policy.ACTION_DIM
+    # Munich data only: feed the model munich16 state/actions in the 20-dim sim slots, so a sim-fine-tuned
+    # checkpoint keeps its per-joint meaning. Client-facing actions stay munich16. Needs its own norm stats.
+    sim_layout_remap: bool = False
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        if self.sim_layout_remap and (self.action_dim != ebim_task2_policy.MUNICH_DIM or self.use_delta_actions):
+            raise ValueError(
+                "sim_layout_remap needs munich16 data (action_dim=16) with absolute actions, "
+                f"got action_dim={self.action_dim}, use_delta_actions={self.use_delta_actions}."
+            )
         if self.use_delta_actions and self.action_dim != ebim_task2_policy.ACTION_DIM:
             raise ValueError(
                 f"use_delta_actions=True needs the {ebim_task2_policy.ACTION_DIM}-dim sim layout delta mask, "
@@ -394,10 +402,19 @@ class LeRobotEbimTask2DataConfig(DataConfigFactory):
             ]
         )
 
-        data_transforms = _transforms.Group(
-            inputs=[ebim_task2_policy.EbimTask2Inputs(model_type=model_config.model_type)],
-            outputs=[ebim_task2_policy.EbimTask2Outputs(action_dim=self.action_dim)],
-        )
+        if self.sim_layout_remap:
+            data_transforms = _transforms.Group(
+                inputs=[
+                    ebim_task2_policy.EbimTask2Inputs(model_type=model_config.model_type),
+                    ebim_task2_policy.MunichToSimLayout(),
+                ],
+                outputs=[ebim_task2_policy.SimToMunichLayout()],
+            )
+        else:
+            data_transforms = _transforms.Group(
+                inputs=[ebim_task2_policy.EbimTask2Inputs(model_type=model_config.model_type)],
+                outputs=[ebim_task2_policy.EbimTask2Outputs(action_dim=self.action_dim)],
+            )
 
         if self.use_delta_actions:
             # The dataset stores absolute targets. Convert the arm joints and spine to delta actions
@@ -627,6 +644,8 @@ _MUNICH_REAL_DATA = LeRobotEbimTask2DataConfig(
     use_delta_actions=False,
     action_dim=16,
 )
+# Same data in the sim 20-dim model layout, for fine-tuning from a sim checkpoint.
+_MUNICH_REAL_DATA_SIM_LAYOUT = dataclasses.replace(_MUNICH_REAL_DATA, sim_layout_remap=True)
 # Literal copy of examples/ebim_task2/robot_client/layout.py:POLICY_METADATA (openpi cannot import from
 # examples/). examples/ebim_task2/robot_client/tests/test_train_config_contract.py guards equality.
 _MUNICH_REAL_METADATA = {
@@ -983,6 +1002,26 @@ _CONFIGS = [
         ),
         data=_MUNICH_REAL_DATA,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=32,
+        num_train_steps=30_000,
+        ema_decay=0.99,
+        save_interval=5_000,
+        policy_metadata=_MUNICH_REAL_METADATA,
+    ),
+    TrainConfig(
+        # Same recipe as pi05_ebim_task2_munich_real, but initialised from the best sim full fine-tune
+        # (pi05_ebim_task2_fixpos_200_and_v5_from_fft @ 29999, HF Ching-Yeh/ebim-task2) with the munich16 data
+        # remapped into the sim 20-dim slots. Own norm stats (20-dim); client contract is unchanged.
+        name="pi05_ebim_task2_munich_real_from_sim",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+        ),
+        data=_MUNICH_REAL_DATA_SIM_LAYOUT,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "./checkpoints/pi05_ebim_task2_fixpos_200_and_v5_from_fft/pi05_fixpos_200_and_v5_from_fft_full_finetune/29999/params"
+        ),
         batch_size=32,
         num_train_steps=30_000,
         ema_decay=0.99,

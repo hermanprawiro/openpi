@@ -19,6 +19,23 @@ Configs (both in `src/openpi/training/config.py`, same data, same prompt, same m
 |---|---|---|---|---|
 | `pi05_ebim_task2_munich_real` | full fine-tune, EMA 0.99 | 32 | 30,000 | 5,000 |
 | `pi05_lora_ebim_task2_munich_real` | LoRA, no EMA | 16 | 15,000 | 2,500 |
+| `pi05_ebim_task2_munich_real_from_sim` | full fine-tune from the sim checkpoint, EMA 0.99 | 32 | 30,000 | 5,000 |
+
+`pi05_ebim_task2_munich_real_from_sim` starts from the best sim full fine-tune
+(`pi05_ebim_task2_fixpos_200_and_v5_from_fft` @ 29999) instead of `pi05_base`. So that every joint lands in the slot
+(and state-token position) the sim model learned it in, its data config sets `sim_layout_remap=True`: on the server side
+munich16 state/actions are moved into the 20-dim sim layout (L arm 3:10, R arm 10:17, grippers 17:19, base and spine
+zero) and actions are mapped back to munich16 on output, so the robot client and its layout check are unchanged.
+State grippers (knuckle rad, 0 = open) are negated so they rise with opening like the sim open-fraction; action grippers
+(width %) already do. It needs **its own 20-dim norm stats** (section 2) and the sim `params/` on disk:
+
+```bash
+P=checkpoints/pi05_ebim_task2_fixpos_200_and_v5_from_fft/pi05_fixpos_200_and_v5_from_fft_full_finetune/29999
+hf download Ching-Yeh/ebim-task2 --include "$P/params/*" --include "$P/assets/*" --local-dir .   # ~12 GB, one --include per pattern
+```
+
+The real arm poses differ a lot from the sim ones (per-joint medians up to ~2 rad apart), so how much the sim prior
+helps is an empirical question: compare it with the `pi05_base` run on the hold-out (section 5).
 
 ## 0. Prerequisites
 
@@ -69,6 +86,12 @@ cp assets/pi05_lora_ebim_task2_munich_real/ebim/task2_munich_real/norm_stats.jso
 sha256sum assets/pi05*_munich_real/ebim/task2_munich_real/norm_stats.json   # the two hashes must match
 ```
 
+For `pi05_ebim_task2_munich_real_from_sim` compute its own stats (20-dim, not interchangeable with the two above):
+
+```bash
+uv run --env-file .env scripts/compute_norm_stats.py --config-name pi05_ebim_task2_munich_real_from_sim
+```
+
 Expected, not a bug: left knuckle state (dim 7) has q01 = q99 = 0 and the left gripper action (dim 7) is constant 1.0.
 `assets/` is gitignored. Training copies the stats into each checkpoint's `assets/`, and the server and the hold-out
 eval read them from there. Recompute and recopy whenever the dataset is converted again.
@@ -79,6 +102,12 @@ Full fine-tune (the real run):
 
 ```bash
 uv run --env-file .env scripts/train.py pi05_ebim_task2_munich_real --exp-name=munich_v1 --fsdp-devices 8 --overwrite
+```
+
+From the sim checkpoint (same flags; one GB200 or 80 GB-class GPU per run is enough):
+
+```bash
+uv run --env-file .env scripts/train.py pi05_ebim_task2_munich_real_from_sim --exp-name=munich_v1 --overwrite
 ```
 
 LoRA (24 GB stand-in, also usable as a quick baseline):
