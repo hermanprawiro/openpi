@@ -942,9 +942,11 @@ function init() {
   els.runSelect.addEventListener('change', function () {
     autoPicked = true;
     selectRun(els.runSelect.value || null, {});
+    els.runSelect.blur(); // a focused select swallows the step keys and changes its option on arrow keys
   });
   els.epSelect.addEventListener('change', function () {
     const name = els.epSelect.value;
+    els.epSelect.blur(); // see the run picker
     if (!name || name === state.ep) return;
     const eps = (state.runInfo && state.runInfo.episodes) || [];
     if (!eps.length || eps[eps.length - 1].name !== name) state.follow = false;
