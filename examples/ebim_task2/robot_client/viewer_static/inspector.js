@@ -407,10 +407,11 @@ function renderHeader(k, ch, al, info) {
   });
 }
 
-function startOffsetRow(side, value, limit) {
+function startOffsetRow(side, value, limit, checked) {
   const row = el('div', 'insp-row');
   row.appendChild(el('span', 'insp-row-name', side + ' arm'));
-  const over = typeof value === 'number' && typeof limit === 'number' && value > limit;
+  // The runner checks the start offset only for the first chunk after start / HOLD (runner.py first_chunk).
+  const over = checked && typeof value === 'number' && typeof limit === 'number' && value > limit;
   const val = el('span', 'insp-row-val' + (over ? ' over' : ''), value === null || value === undefined ? EN : value.toFixed(3) + ' rad');
   row.appendChild(val);
   if (typeof limit === 'number') {
@@ -463,8 +464,13 @@ function renderSide(k, ch, al, info) {
   so.appendChild(el('h3', 'insp-h', 'Start offset (row 0 vs measured at receipt)'));
   activeArms().forEach(function (side) {
     const v = al && al.start_offset ? al.start_offset[side] : null;
-    so.appendChild(startOffsetRow(side, typeof v === 'number' ? v : null, limit));
+    so.appendChild(startOffsetRow(side, typeof v === 'number' ? v : null, limit, !!(al && al.first === true)));
   });
+  if (al && al.first !== true) {
+    so.appendChild(el('div', 'note', al.first === false
+      ? 'not checked (not first chunk): the start check only applies to the first chunk after start / HOLD'
+      : 'not checked (first chunk not known yet)'));
+  }
   if (limit === null) so.appendChild(el('div', 'note', 'safety.max_start_offset_rad not known for this run'));
   s.appendChild(so);
 
@@ -475,8 +481,10 @@ function renderSide(k, ch, al, info) {
   const mism = mode === 'async' ? blended() : summary && summary.alignment ? summary.alignment.mismatches : null;
   const line = el('div', 'insp-row');
   if (typeof mism === 'number') {
-    const text = 'alignment: ' + mism + (mode === 'async' ? ' blended' : ' mismatches');
-    const t = el('span', mism > 0 ? 'pill pill-amber' : 'insp-row-val', text);
+    const text = mode === 'async'
+      ? mism + ' ticks differ from their chunk row (expected when chunks blend)'
+      : 'alignment: ' + mism + ' mismatches';
+    const t = el('span', mode !== 'async' && mism > 0 ? 'pill pill-amber' : 'insp-row-val', text);
     t.title = mode === 'async'
       ? 'run ticks whose executed action differs from the row of their chunk (async blends chunks)'
       : 'run ticks whose executed action differs from the row the queue should have given';
