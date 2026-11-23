@@ -319,3 +319,102 @@ def test_chunks_cache_other_failures_keep_previous(tmp_path, monkeypatch):
 
         monkeypatch.setattr(viewer_data.ChunksCache, "_load", bad)
         assert cache.read() is first
+
+
+# ---- per-poll cost: caches and trimmed summary ----
+
+
+def test_summary_omits_per_step(tmp_path, serve):
+    make_run(tmp_path)
+    _, summary = serve().get("/api/runs/run_test/episode_000/summary")
+    assert "per_step" not in summary["alignment"]
+    assert {"chunks", "mismatches"} <= summary["alignment"].keys()
+
+
+def test_poll_work_is_cached(tmp_path, serve, monkeypatch):
+    from robot_client import viewer_align
+    import yaml
+
+    run = make_run(tmp_path)
+    calls = {"yaml": 0, "images": 0, "align": 0}
+    real_yaml, real_images, real_align = yaml.safe_load, viewer_data.image_index, viewer_align.align
+
+    def count(name, fn):
+        def wrapper(*a, **k):
+            calls[name] += 1
+            return fn(*a, **k)
+
+        return wrapper
+
+    monkeypatch.setattr(yaml, "safe_load", count("yaml", real_yaml))
+    monkeypatch.setattr(viewer_data, "image_index", count("images", real_images))
+    monkeypatch.setattr(viewer_align, "align", count("align", real_align))
+    client = serve()
+    base = "/api/runs/run_test/episode_000"
+
+    bodies = []
+    for _ in range(3):
+        client.get(f"{base}/steps?from=0")
+        client.get(f"{base}/chunks?from=0")
+        bodies.append(client.raw(f"{base}/summary")[2])
+        client.get("/api/runs/run_test")
+    assert bodies[0] == bodies[1] == bodies[2]
+    assert calls == {"yaml": 1, "images": 1, "align": 1}
+
+    # a new image file changes its camera dir's mtime: the index (and so the summary) refreshes
+    cam = run / "episode_000" / "images" / "head"
+    new = cam / "step_999999.jpg"
+    new.write_bytes((cam / "step_000000.jpg").read_bytes())
+    os.utime(cam, ns=(1, cam.stat().st_mtime_ns + 5_000_000_000))
+    _, summary = client.get(f"{base}/summary")
+    assert calls["images"] == 2
+    assert 999999 in summary["images"]["head"]
+
+    # a changed config.yaml is re-read
+    cfg = run / "config.yaml"
+    cfg.write_text(cfg.read_text() + "\n# touched\n")
+    client.get(f"{base}/steps?from=0")
+    assert calls["yaml"] == 2
+
+
+def test_summary_refreshes_when_result_appears(tmp_path, serve):
+    run = make_run(tmp_path)
+    client = serve()
+    base = "/api/runs/run_test/episode_000"
+    assert client.get(f"{base}/summary")[1]["result"] is not None
+    (run / "episode_000" / "result.json").write_text('{"outcome": "f"}')
+    assert client.get(f"{base}/summary")[1]["result"] == {"outcome": "f"}
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [
+        ("root", "active_arms", "left"),
+        ("root", "active_arms", ["left", "bogus"]),
+        ("root", "active_arms", []),
+        ("inference", "execute_horizon", "thirty"),
+        ("inference", "execute_horizon", True),
+        ("inference", "execute_horizon", 0),
+        ("inference", "execute_horizon", 2.5),
+        ("inference", "mode", "asy"),
+        ("inference", "mode", ["sync"]),
+    ],
+)
+def test_odd_config_values_fall_back_to_defaults(tmp_path, serve, section, key, value):
+    import yaml
+
+    run = make_run(tmp_path)
+    cfg_path = run / "config.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    (cfg if section == "root" else cfg.setdefault(section, {}))[key] = value
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    client = serve()
+    base = "/api/runs/run_test/episode_000"
+    assert client.get("/api/runs/run_test")[0] == 200
+    status, steps = client.get(f"{base}/steps?from=0")
+    assert status == 200
+    assert steps["steps"]
+    assert client.get(f"{base}/chunks?from=0")[0] == 200
+    status, summary = client.get(f"{base}/summary")
+    assert status == 200
+    assert summary["alignment"]["chunks"]

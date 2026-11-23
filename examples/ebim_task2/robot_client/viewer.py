@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 import numpy as np
 
 from robot_client import labels
+from robot_client import layout
 from robot_client import viewer_align
 from robot_client import viewer_data
 
@@ -49,26 +50,85 @@ class _NotFoundError(Exception):
     pass
 
 
+def _sig(path: Path) -> tuple[int, int] | None:
+    """(mtime_ns, size) of a file, or None if it is missing."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
 class _Episode:
-    """The incremental readers of one episode, plus the last alignment (recomputed only when its inputs change)."""
+    """The incremental readers of one episode, plus what is derived from them (the alignment, the image index and
+    the encoded summary), each recomputed only when its inputs change: a poll of an unchanged episode costs a few
+    stat() calls."""
 
     def __init__(self, ep_dir: Path):
+        self.dir = ep_dir
         self.lock = threading.Lock()
         self.steps = viewer_data.StepsTail(ep_dir / "steps.jsonl")
         self.chunks = viewer_data.ChunksCache(ep_dir / "chunks.npz")
         self._aligned_for: tuple[int, dict | None, dict] | None = None  # (n steps, chunks, align args)
         self._alignment: viewer_align.Alignment | None = None
+        self._images_for: tuple | None = None
+        self._images: dict[str, list[int]] = {}
+        self._summary_for: tuple | None = None
+        self._summary: bytes = b""
+
+    def _read(self, align_args: dict) -> tuple[list[dict], dict | None, viewer_align.Alignment]:
+        steps = self.steps.read()  # before chunks: chunks are at least as new as steps
+        chunks = self.chunks.read()
+        same = self._aligned_for
+        if same is None or same[0] != len(steps) or same[1] is not chunks or same[2] != align_args:
+            self._alignment = viewer_align.align(steps, chunks, **align_args)
+            self._aligned_for = (len(steps), chunks, dict(align_args))
+        return steps, chunks, self._alignment
 
     def read(self, align_args: dict) -> tuple[list[dict], dict | None, viewer_align.Alignment]:
-        """steps, chunks, alignment. `steps.jsonl` is read before `chunks.npz`: chunks are at least as new."""
+        """steps, chunks, alignment."""
         with self.lock:
-            steps = self.steps.read()
-            chunks = self.chunks.read()
-            same = self._aligned_for
-            if same is None or same[0] != len(steps) or same[1] is not chunks or same[2] != align_args:
-                self._alignment = viewer_align.align(steps, chunks, **align_args)
-                self._aligned_for = (len(steps), chunks, dict(align_args))
-            return steps, chunks, self._alignment
+            return self._read(align_args)
+
+    def _image_index(self) -> tuple[tuple, dict[str, list[int]]]:
+        """Adding a file updates its camera directory's mtime, so the directory mtimes are the cache key."""
+        images = self.dir / "images"
+        try:
+            key = tuple(sorted((p.name, _sig(p)) for p in images.iterdir() if p.is_dir()))
+        except OSError:
+            key = ()
+        key = (_sig(images), tuple((name, sig and sig[0]) for name, sig in key))
+        if self._images_for != key:
+            self._images = viewer_data.image_index(self.dir)
+            self._images_for = key
+        return key, self._images
+
+    def summary_body(self, align_args: dict, episode_json: bytes) -> bytes:
+        """The encoded `/summary` response; `episode_json` (cheap, depends on events.log) is spliced in front."""
+        with self.lock:
+            steps, _, alignment_obj = self._read(align_args)
+            image_key, images = self._image_index()
+            key = (
+                len(steps),
+                id(self._aligned_for[1]),
+                repr(align_args),
+                image_key,
+                _sig(self.dir / "result.json"),
+                _sig(self.dir / "stream_stats.json"),
+            )
+            if self._summary_for != key:
+                alignment = alignment_obj.to_json()
+                del alignment["per_step"]  # `/steps` carries chunk_k / row / clamped per record
+                self._summary = _json_bytes(
+                    {
+                        "alignment": alignment,
+                        "images": images,
+                        "result": _read_json_file(self.dir / "result.json"),
+                        "stream_stats": _read_json_file(self.dir / "stream_stats.json"),
+                    }
+                )
+                self._summary_for = key
+            return b'{"episode":' + episode_json + b"," + self._summary[1:]
 
 
 class ViewerServer(ThreadingHTTPServer):
@@ -81,6 +141,20 @@ class ViewerServer(ThreadingHTTPServer):
         self.verbose = False
         self._episodes: dict[Path, _Episode] = {}
         self._episodes_lock = threading.Lock()
+        self._configs: dict[Path, tuple[tuple[int, int], dict | None]] = {}
+        self._configs_lock = threading.Lock()
+
+    def config(self, run_dir: Path) -> dict | None:
+        """`config_summary`, re-read only when config.yaml's (mtime_ns, size) changes."""
+        sig = _sig(run_dir / "config.yaml")
+        if sig is None:
+            return None
+        with self._configs_lock:
+            cached = self._configs.get(run_dir)
+            if cached is None or cached[0] != sig:
+                cached = (sig, viewer_data.config_summary(run_dir))
+                self._configs[run_dir] = cached
+            return cached[1]
 
     def episode(self, ep_dir: Path) -> _Episode:
         with self._episodes_lock:
@@ -232,24 +306,30 @@ class Handler(BaseHTTPRequestHandler):
             if parts[3] == "chunks":
                 return self._send_json(self._chunks(run_dir, ep_dir, _from_param(query)))
             if parts[3] == "summary":
-                return self._send_json(self._summary(run_dir, ep_dir))
+                return self._send(200, "application/json", self._summary_body(run_dir, ep_dir))
         raise _NotFoundError
 
-    @staticmethod
-    def _align_args(run_dir: Path) -> dict:
-        cfg = viewer_data.config_summary(run_dir)
+    def _align_args(self, run_dir: Path) -> dict:
+        """The alignment inputs from config.yaml; any field of an odd type or value falls back to its default."""
+        args = {"mode": DEFAULT_ALIGN["mode"], "execute_horizon": DEFAULT_ALIGN["execute_horizon"]}
+        args["active_arms"] = list(DEFAULT_ALIGN["active_arms"])
+        cfg = self.server.config(run_dir)
         if cfg is None:
-            return dict(DEFAULT_ALIGN)
-        return {
-            "mode": cfg["mode"] or DEFAULT_ALIGN["mode"],
-            "execute_horizon": cfg["execute_horizon"] or DEFAULT_ALIGN["execute_horizon"],
-            "active_arms": list(cfg["active_arms"] or DEFAULT_ALIGN["active_arms"]),
-        }
+            return args
+        if cfg["mode"] in ("sync", "async"):
+            args["mode"] = cfg["mode"]
+        horizon = cfg["execute_horizon"]
+        if isinstance(horizon, int) and not isinstance(horizon, bool) and horizon >= 1:
+            args["execute_horizon"] = horizon
+        arms = cfg["active_arms"]
+        if isinstance(arms, list) and arms and all(a in layout.ARM_SLICES for a in arms):
+            args["active_arms"] = list(arms)
+        return args
 
     def _run_info(self, run_dir: Path) -> dict:
         events = viewer_data.read_events(run_dir)
         live = viewer_data.run_is_live(run_dir)
-        config = viewer_data.config_summary(run_dir)
+        config = self.server.config(run_dir)
         if config is not None:
             config = {**config, "safety": _scalar_safety(config["safety"])}
         server_meta = _read_json_file(run_dir / "server_metadata.json")
@@ -296,18 +376,11 @@ class Handler(BaseHTTPRequestHandler):
                 )
         return {"chunks": out}
 
-    def _summary(self, run_dir: Path, ep_dir: Path) -> dict:
-        _, _, alignment = self._read_episode(run_dir, ep_dir)
+    def _summary_body(self, run_dir: Path, ep_dir: Path) -> bytes:
         events = viewer_data.read_events(run_dir)
         episodes = viewer_data.episode_list(run_dir, events, viewer_data.run_is_live(run_dir))
         entry = next((e for e in episodes if e["name"] == ep_dir.name), None)
-        return {
-            "episode": entry,
-            "alignment": alignment.to_json(),
-            "images": viewer_data.image_index(ep_dir),
-            "result": _read_json_file(ep_dir / "result.json"),
-            "stream_stats": _read_json_file(ep_dir / "stream_stats.json"),
-        }
+        return self.server.episode(ep_dir).summary_body(self._align_args(run_dir), _json_bytes(entry))
 
     # ---- images ----
 
