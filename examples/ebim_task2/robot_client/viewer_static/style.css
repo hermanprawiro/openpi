@@ -198,3 +198,88 @@ main > section:empty { display: none; }
   #run-events .ev { grid-template-columns: 64px 1fr; }
   #run-events .ev-msg { grid-column: 1 / -1; }
 }
+
+/* ---- plots.js: timeline, joint plots, health strip ----
+ * Series colours are set in plots.js (ink measured, blue commanded, orange policy action, aqua plan, grey stale
+ * rows, red clamp marker); these rules style the chrome around the canvases. */
+.sec-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 18px;
+  margin-bottom: 4px;
+}
+.sec-title { margin: 0; font-size: 13px; font-weight: 700; color: var(--ink-2); letter-spacing: 0.02em; }
+.legend { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; font-size: 12px; color: var(--ink-2); }
+.legend-item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.legend-note { color: var(--muted); }
+
+.key { display: inline-block; flex: 0 0 auto; vertical-align: middle; }
+.key-line { width: 16px; height: 0; border-top: 2px solid var(--key); }
+.key-dash { width: 16px; height: 0; border-top: 2px dashed var(--key); }
+.key-box { width: 12px; height: 12px; border-radius: 2px; background: var(--key); outline: 1px solid rgba(0, 0, 0, 0.45); }
+.key-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--key); }
+.key-cursor { width: 0; height: 12px; border-left: 2px solid var(--key); margin: 0 7px; }
+.key-tri {
+  width: 0; height: 0;
+  border-left: 5px solid transparent; border-right: 5px solid transparent;
+  border-bottom: 8px solid var(--key);
+}
+
+.chart { position: relative; width: 100%; cursor: crosshair; user-select: none; }
+.chart[hidden] { display: none; }
+.chart canvas { position: absolute; left: 0; top: 0; display: block; }
+.chart .hair {
+  position: absolute; width: 0;
+  border-left: 1px solid rgba(11, 11, 11, 0.35);
+  pointer-events: none;
+}
+.chart .hair[hidden] { display: none; }
+
+#timeline .note:empty { display: none; }
+
+.view-switch { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; font-size: 12px; }
+.view-switch .muted { margin-right: 4px; }
+.view-switch button { min-height: 24px; padding: 1px 8px; font-size: 12px; }
+.view-switch button[aria-pressed="true"] { border-color: var(--mode-run); background: #eaf2fc; font-weight: 600; }
+
+.arm-cols { display: grid; grid-template-columns: repeat(var(--cols, 2), minmax(0, 1fr)); gap: 8px 28px; }
+.arm-title { margin: 6px 0 2px; font-size: 13px; font-weight: 700; }
+.plot { margin-top: 4px; }
+.plot-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; min-height: 22px; }
+.plot-title {
+  border: 0; background: transparent; padding: 1px 4px; margin-left: -4px; min-height: 0;
+  font-weight: 600; font-size: 13px; border-radius: 3px;
+  border-bottom: 2px solid transparent;
+}
+.plot-title:hover:not(:disabled) { background: #f0efea; }
+.plot.selected .plot-title { border-bottom-color: var(--mode-run); background: #eaf2fc; }
+.plot.selected .plot-title::after { content: " · in inspector"; font-weight: 400; color: var(--muted); font-size: 12px; }
+.plot-name { font-weight: 600; font-size: 13px; }
+.plot-sub { color: var(--muted); font-size: 12px; }
+
+.health-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 28px; }
+
+.plot-tip {
+  position: fixed; z-index: 20; pointer-events: none;
+  max-width: 360px;
+  background: var(--panel);
+  border: 1px solid rgba(11, 11, 11, 0.18);
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  padding: 6px 9px;
+  font-size: 12px;
+  color: var(--ink);
+}
+.plot-tip[hidden] { display: none; }
+.plot-tip .tip-head { font-weight: 600; margin-bottom: 2px; }
+.plot-tip .tip-reason { color: var(--ink-2); overflow-wrap: anywhere; }
+.plot-tip .tip-sub { color: var(--muted); }
+.plot-tip table { border-collapse: collapse; }
+.plot-tip td { padding: 1px 4px 1px 0; vertical-align: middle; }
+.plot-tip .tip-name { color: var(--ink-2); padding-right: 12px; }
+.plot-tip .tip-val { text-align: right; font-variant-numeric: tabular-nums; }
+
+@media (max-width: 900px) {
+  .arm-cols, .health-grid { grid-template-columns: minmax(0, 1fr); }
+}

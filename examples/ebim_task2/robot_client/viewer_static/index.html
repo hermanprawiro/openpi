@@ -79,5 +79,9 @@
 <footer id="keys" class="muted">Keys: &larr;/&rarr; one step, Shift+&larr;/&rarr; 20 steps, space play/pause.</footer>
 
 <script type="module" src="/static/app.js"></script>
+<script type="module">
+  import { mountPlots } from '/static/plots.js';
+  mountPlots(document);
+</script>
 </body>
 </html>
