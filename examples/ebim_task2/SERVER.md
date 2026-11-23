@@ -12,17 +12,19 @@ the client refuses a server whose layout or prompt does not match.
 
 - A Linux machine with an NVIDIA GPU, Docker with the `docker compose` plugin, the NVIDIA driver and the NVIDIA Container
   Toolkit (so `docker run --gpus all ...` works).
-- **GPU memory:** the model needs about 8 to 10 GB (bf16 inference); an L4 (24 GB) is fine. JAX reserves about 75 % of the
+- **GPU memory:** the model needs about 8 to 10 GB (bf16 inference; the shipped full fine-tune peaked at 6.6 GiB
+  when loaded and run without JAX's up-front reservation); an L4 (24 GB) is fine. JAX reserves about 75 % of the
   GPU's memory when it starts, so `nvidia-smi` will show far more than 10 GB in use. That is expected. No other large
   GPU job should run on the same GPU.
 - The openpi checkout at the commit we gave you (the same one as for the client). **The server container does not contain
   the source code: it bind-mounts the checkout at `/app` and runs `uv run scripts/serve_policy.py` there.**
 - Internet access for the image build and the checkpoint download. Starting the server afterwards works without
   internet once the tokenizer file is in place (see [section 6](#6-offline-use)).
-- The checkpoint we name in the hand-over message, as three words: `<config>`, `<exp>`, `<step>`. The two configs we
-  ship are `pi05_lora_ebim_task2_munich_real` (LoRA, the stand-in) and `pi05_ebim_task2_munich_real` (full fine-tune).
-  **Shipped now: `pi05_lora_ebim_task2_munich_real` `munich_v1` `12500`** (the LoRA stand-in; best hold-out step, see
-  its `holdout_eval.json`). The commands below use it.
+- The checkpoint we name in the hand-over message, as three words: `<config>`, `<exp>`, `<step>`. The configs with
+  checkpoints are `pi05_ebim_task2_munich_real` (full fine-tune from `pi05_base`), `pi05_ebim_task2_munich_real_from_sim`
+  (full fine-tune from the sim checkpoint) and `pi05_lora_ebim_task2_munich_real` (the earlier LoRA stand-in).
+  **Shipped now: `pi05_ebim_task2_munich_real` `munich_v1` `29999`** (hold-out scores in its `holdout_eval.json` and in
+  [TRAINING_REAL.md §5](TRAINING_REAL.md#5-hold-out-eval-and-choosing-a-step)). The commands below use it.
 
 ## 2. Get the checkpoint
 
@@ -37,17 +39,19 @@ hf download hermanprawiro/ebim-task2-real \
     --include "<config>/<exp>/<step>/*" --local-dir checkpoints
 ```
 
-The shipped checkpoint (about 6 GB; 78 s on our connection):
+The shipped checkpoint (about 12.4 GB; 113 s on a fast connection):
 
 ```bash
 hf download hermanprawiro/ebim-task2-real \
-    --include "pi05_lora_ebim_task2_munich_real/munich_v1/12500/*" --local-dir checkpoints
+    --include "pi05_ebim_task2_munich_real/munich_v1/29999/*" --local-dir checkpoints
 ```
 
 `hf` prints `Warning: You are sending unauthenticated requests ...`; that is expected and harmless. With a
 `huggingface_hub` older than 0.34 the command is called `huggingface-cli download`, with the same arguments; with
-version 1.0 or newer only `hf` exists. Verified with `huggingface_hub` 2.4.0 from a fresh clone and no credentials:
-the files are byte-identical to ours, and the server loaded them and reported `checkpoint munich_v1/12500`.
+version 1.0 or newer only `hf` exists. Verified with `huggingface_hub` 1.18.0 and no credentials: the downloaded
+files (24) are byte-identical to ours, and openpi loaded them with the shipped config and returned `(50, 16)` chunks on
+hold-out frames. (The Docker server itself was last checked end to end with the LoRA stand-in, `munich_v1/12500`,
+downloaded the same way with `huggingface_hub` 2.4.0; the full fine-tune goes through the same loading code.)
 
 The checkpoint directory is then `checkpoints/<config>/<exp>/<step>`. Check that it contains `params/` and `assets/`,
 and that `assets/ebim/task2_munich_real/norm_stats.json` exists. The `assets` folder holds the normalisation statistics
@@ -63,14 +67,17 @@ examples/ebim_task2/serve_munich.sh <config> <ckpt_dir> [port]
 for example
 
 ```bash
-examples/ebim_task2/serve_munich.sh pi05_lora_ebim_task2_munich_real checkpoints/pi05_lora_ebim_task2_munich_real/munich_v1/12500
+examples/ebim_task2/serve_munich.sh pi05_ebim_task2_munich_real checkpoints/pi05_ebim_task2_munich_real/munich_v1/29999
 ```
 
 - `<config>` **must be the config the checkpoint was trained with** (the directory name of the checkpoint's first level).
-  A LoRA checkpoint with the full-FT config name, or the reverse, fails to load.
+  A LoRA checkpoint with the full-FT config name, or the reverse, fails to load. The two full-FT configs
+  (`pi05_ebim_task2_munich_real` and `pi05_ebim_task2_munich_real_from_sim`) share the architecture, so the server
+  checks the width of the checkpoint's norm stats against the config (16, or 20 for `_from_sim`) before loading the
+  model and refuses a mismatch (see [section 7](#7-troubleshooting)).
 - `<ckpt_dir>` is the step directory (it contains `params/` and `assets/`). The script checks that and stops with an
   error otherwise. It is mounted read-only at `/ckpt/<exp>/<step>` in the container; the server reports `<exp>/<step>`
-  (e.g. `munich_v1/12500`) to every client as the checkpoint name.
+  (e.g. `munich_v1/29999`) to every client as the checkpoint name.
 - `[port]` defaults to 8000. The server listens on all interfaces (host networking); open that TCP port for the robot
   laptop in the firewall.
 - The first start builds the image (`scripts/docker/serve_policy.Dockerfile`, a CUDA 12.2 base image, uv and the Python
@@ -123,9 +130,10 @@ $RC check-infer          # see README_ROBOT_CLIENT.md, section 4.2
 the robot laptop, with `POLICY_SERVER_HOST` set to this machine).
 
 Required: `check_infer: PASS`; the `server` row shows `layout munich16`, the config name and the checkpoint name
-(`<exp>/<step>`, for the shipped one `config pi05_lora_ebim_task2_munich_real, checkpoint munich_v1/12500`); the chunk
-shape is `(50, 16)`. On our RTX 3090, with the client on the same machine, the shipped checkpoint took about 0.2 s per
-request (round trip mean 193 ms, max 432 ms over 10 requests; server inference about 170-190 ms). An evaluator measured
+(`<exp>/<step>`, for the shipped one `config pi05_ebim_task2_munich_real, checkpoint munich_v1/29999`); the chunk
+shape is `(50, 16)`. On our RTX 3090, with the client on the same machine, the LoRA stand-in took about 0.2 s per
+request (round trip mean 193 ms, max 432 ms over 10 requests; server inference about 170-190 ms). The full fine-tune
+has the same network without the LoRA adapters and was not timed on a 3090; on a GB200 its inference took about 60 ms. An evaluator measured
 0.5 to 0.6 s per request on an L4 for a different pi0.5 (round trip 0.59 s); expect something in between.
 `check-infer` warns if the slowest request is longer than the 1.5 s one executed chunk lasts.
 
@@ -181,11 +189,12 @@ reaches `Warmup done` with **no network at all** (container run with `network_mo
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `error: checkpoint dir not found: ...` / `error: .../params is missing (point at the step dir, e.g. .../<exp>/30000)` (from `serve_munich.sh`) | Wrong `<ckpt_dir>`, or an incomplete download | Point at the step directory that contains `params/` and `assets/`; download again |
+| `error: checkpoint dir not found: ...` / `error: .../params is missing (point at the step dir, e.g. .../<exp>/29999)` (from `serve_munich.sh`) | Wrong `<ckpt_dir>`, or an incomplete download | Point at the step directory that contains `params/` and `assets/`; download again |
 | `huggingface-cli: command not found`, or `hf: command not found` | The CLI name depends on the `huggingface_hub` version | `pip install -U huggingface_hub` and use `hf download ...` (older versions: `huggingface-cli download ...`, same arguments) |
 | `401 Client Error` / `Repository Not Found` while downloading | A typo in the repository name or path, or an invalid token in `HF_TOKEN` / a stale `hf auth login` | Check the name (`hermanprawiro/ebim-task2-real`) and the path; the repository is public, so `unset HF_TOKEN` and try again |
 | `required variable CKPT_DIR is missing a value` / `... POLICY_CONFIG ...` | Compose was run without the variables | Use `serve_munich.sh`, or set both |
 | Errors about missing or mismatching parameters while loading, or a shape error | `<config>` does not match the checkpoint (LoRA vs full fine-tune), or the checkpoint is not a Munich one | Use the config named by the checkpoint's first directory level |
+| `ValueError: state norm stats are 20-dim, but this config expects 16` (or `16-dim ... expects 20`) | The checkpoint was trained with the other full-FT config (`_from_sim` or not) | Start again with the config named by the checkpoint's first directory level |
 | `FileNotFoundError` for `norm_stats.json` | The `assets/` folder is missing or in the wrong place | Download the whole `<config>/<exp>/<step>/*`; `assets/ebim/task2_munich_real/norm_stats.json` must exist |
 | The log hangs or fails while downloading the tokenizer | No internet (`gs://big_vision/paligemma_tokenizer.model`) | Section 6 |
 | Out-of-memory (`RESOURCE_EXHAUSTED`) during load or warm-up | Another process holds GPU memory | Stop other GPU jobs (also another server instance); check `nvidia-smi` |

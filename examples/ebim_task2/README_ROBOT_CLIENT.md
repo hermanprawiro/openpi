@@ -222,10 +222,11 @@ $RC check-infer
 Connects to the policy server, checks that it serves our layout (`munich16`) and the exact prompt, sends 3 requests built
 from the live streams (zeros if streams are missing), and prints the chunk shape (expect `(50, 16)`), the round-trip time
 and the server's own inference time. Required: `check_infer: PASS`. The `server` row also shows the checkpoint name the
-server loaded (`<exp>/<step>`); write it down. The checkpoint we ship for the session is the LoRA stand-in
-`pi05_lora_ebim_task2_munich_real`, step `munich_v1/12500` (see [SERVER.md](SERVER.md)), so expect
-`config pi05_lora_ebim_task2_munich_real, checkpoint munich_v1/12500` unless we told you otherwise. On our RTX 3090 a
-round trip was about 0.2 s (mean 193 ms, max 432 ms over 10 requests).
+server loaded (`<exp>/<step>`); write it down. The checkpoint we ship for the session is the full fine-tune
+`pi05_ebim_task2_munich_real`, step `munich_v1/29999` (see [SERVER.md](SERVER.md)), so expect
+`config pi05_ebim_task2_munich_real, checkpoint munich_v1/29999` unless we told you otherwise. On our RTX 3090 a
+round trip with the earlier LoRA stand-in was about 0.2 s (mean 193 ms, max 432 ms over 10 requests); the full
+fine-tune was not timed on that GPU.
 
 A `warn latency ... the arm will wait for the policy` row means a request took longer than the time one chunk lasts
 (1.5 s in the default sync mode). The robot still runs, but slowly; tell us the numbers.

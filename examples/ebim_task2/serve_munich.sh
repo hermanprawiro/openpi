@@ -26,7 +26,7 @@ fi
 ckpt_dir="$(cd "$ckpt_dir" && pwd -P)"
 for sub in params assets; do
   if [[ ! -d "$ckpt_dir/$sub" ]]; then
-    echo "error: $ckpt_dir/$sub is missing (point at the step dir, e.g. .../<exp>/30000)" >&2
+    echo "error: $ckpt_dir/$sub is missing (point at the step dir, e.g. .../<exp>/29999)" >&2
     exit 1
   fi
 done

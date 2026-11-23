@@ -32,8 +32,8 @@ give you, on both machines.
   releases it at the end. Nothing moves without the operator pressing Enter.
 - Both can run on the same machine (set `POLICY_SERVER_HOST=localhost`); that is how we tested it.
 
-**Shipped checkpoint:** config `pi05_lora_ebim_task2_munich_real`, step `munich_v1/12500` (a LoRA stand-in; a full
-fine-tune under `pi05_ebim_task2_munich_real` may replace it, see [section 5](#5-swapping-in-another-checkpoint)).
+**Shipped checkpoint:** config `pi05_ebim_task2_munich_real`, step `munich_v1/29999` (full fine-tune, the last step
+of a 30,000-step run). Alternatives are listed in [section 5](#5-swapping-in-another-checkpoint).
 
 ## 2. Before the session (needs internet)
 
@@ -53,11 +53,11 @@ Needs Docker with `docker compose`, the NVIDIA driver and the NVIDIA Container T
 GPU memory ([SERVER.md §1](SERVER.md#1-what-you-need)).
 
 ```bash
-# 1. Checkpoint (about 6 GB) from the public repo; no account or token needed
+# 1. Checkpoint (about 12.4 GB) from the public repo; no account or token needed
 pip install -U huggingface_hub
 hf download hermanprawiro/ebim-task2-real \
-    --include "pi05_lora_ebim_task2_munich_real/munich_v1/12500/*" --local-dir checkpoints
-ls checkpoints/pi05_lora_ebim_task2_munich_real/munich_v1/12500/assets/ebim/task2_munich_real/norm_stats.json
+    --include "pi05_ebim_task2_munich_real/munich_v1/29999/*" --local-dir checkpoints
+ls checkpoints/pi05_ebim_task2_munich_real/munich_v1/29999/assets/ebim/task2_munich_real/norm_stats.json
 
 # 2. Tokenizer (the server would otherwise download it on its first start)
 mkdir -p ~/.cache/openpi/big_vision
@@ -93,8 +93,8 @@ On the GPU machine. Restart the server shortly before the session rather than le
 container can lose the GPU after a system update).
 
 ```bash
-examples/ebim_task2/serve_munich.sh pi05_lora_ebim_task2_munich_real \
-    checkpoints/pi05_lora_ebim_task2_munich_real/munich_v1/12500
+examples/ebim_task2/serve_munich.sh pi05_ebim_task2_munich_real \
+    checkpoints/pi05_ebim_task2_munich_real/munich_v1/29999
 ```
 
 Wait for `Warmup done in ... s` (one to two minutes). Then, from the laptop:
@@ -129,7 +129,7 @@ Then run these in order. Do not go on until a step passes.
 | # | Command | Moves? | Must show |
 |---|---|---|---|
 | 1 | `$RC check-obs` | no | `check_obs: PASS`; look at the three saved JPEGs |
-| 2 | `$RC check-infer` | no | `check_infer: PASS`, `layout munich16`, `checkpoint munich_v1/12500`, chunk `(50, 16)` |
+| 2 | `$RC check-infer` | no | `check_infer: PASS`, `layout munich16`, `checkpoint munich_v1/29999`, chunk `(50, 16)` |
 | 3 | `$RC check-motion --arm right` | **one arm, ±0.05 rad per joint** | `check_motion_right: PASS`, every joint `follows` |
 | 4 | `$RC check-motion --arm left` | **one arm, ±0.05 rad per joint** | `check_motion_left: PASS`, every joint `follows` |
 | 5 | `$RC prepare` | **both arms to the start pose, spine, grippers** | `prepare: done` |
@@ -171,9 +171,20 @@ Only the server changes. The client image, its YAML and the commands above stay 
 
 1. Between episodes (never during one), stop the server with Ctrl-C.
 2. Download the other step: `hf download hermanprawiro/ebim-task2-real --include "<config>/<exp>/<step>/*" --local-dir checkpoints`.
-3. Start it with **the config it was trained with** (the first directory level): for a full fine-tune,
-   `examples/ebim_task2/serve_munich.sh pi05_ebim_task2_munich_real checkpoints/pi05_ebim_task2_munich_real/<exp>/<step>`.
+3. Start it with **the config it was trained with**: always the first directory level of the checkpoint path, e.g.
+   `examples/ebim_task2/serve_munich.sh pi05_ebim_task2_munich_real_from_sim checkpoints/pi05_ebim_task2_munich_real_from_sim/munich_v1/20000`.
+   A wrong pairing of the two full-FT configs stops the server at start with `ValueError: state norm stats are
+   20-dim, but this config expects 16` (or `16-dim ... expects 20`): use the config from the path.
 4. On the laptop, `$RC check-infer` must show the new checkpoint name. `run` records it in `server_metadata.json`.
+
+Checkpoints in the public repo (hold-out scores and how they were chosen: [TRAINING_REAL.md §5](TRAINING_REAL.md#5-hold-out-eval-and-choosing-a-step)):
+
+| Config (= first directory level) | Step | Note |
+|---|---|---|
+| `pi05_ebim_task2_munich_real` | **29999** | shipped; full fine-tune from `pi05_base` |
+| `pi05_ebim_task2_munich_real` | 20000 | same run, best hold-out step by the selection rule |
+| `pi05_ebim_task2_munich_real_from_sim` | 20000, 29999 | full fine-tune from the sim checkpoint: lower arm error and start offset on the hold-out, slightly worse gripper timing |
+| `pi05_lora_ebim_task2_munich_real` | 12500 | the earlier LoRA stand-in (about 6.3 GB) |
 
 Details: [SERVER.md §5](SERVER.md#5-swapping-the-checkpoint). How a checkpoint is trained, scored and uploaded:
 [TRAINING_REAL.md](TRAINING_REAL.md).
