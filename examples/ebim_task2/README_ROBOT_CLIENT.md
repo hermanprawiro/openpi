@@ -53,6 +53,8 @@ check-obs  ->  check-infer  ->  check-motion --arm right  ->  check-motion --arm
            ->  prepare  ->  run --dry-run  ->  run
 ```
 
+Optional, at any time in a second terminal: a read-only browser page of the run ([section 12](#12-optional-watch-the-run-in-a-browser)). The client works the same without it.
+
 **Keys**
 
 **Type the letter, then press Enter** at every prompt that shows a list of answers in brackets: the `Reset the scene...`, `Workspace clear...`, `Outcome?` and `Note` prompts, including `q`, `k`, `s`, `f`, `x`. Only two places react to a single key press, without Enter: `Press Enter to start the policy` (Enter or `q`) and the running policy (`p`, Enter, `q`).
@@ -301,6 +303,8 @@ Expected in a dry run:
 What counts as success: the episode ran without `FREEZE`, and the first chunk's start was accepted (no
 `first action of the ... arm is ... rad from measured`).
 
+Optional: to see the cameras, joints and the policy's plan in a browser while it runs, see [section 12](#12-optional-watch-the-run-in-a-browser).
+
 ### Step 6: `run` (the robot moves)
 
 ```bash
@@ -332,6 +336,8 @@ Without `--episodes` the run continues episode after episode until you answer `q
 
 A `FREEZE` ends the whole `run` command with exit code 3 (during an episode it first asks for a note). To go on, start `run` again with the
 same `--run-name`; the episode numbering continues, nothing is overwritten.
+
+Optional: the browser page of [section 12](#12-optional-watch-the-run-in-a-browser) works the same here; it never moves anything.
 
 ### After the session
 
@@ -760,3 +766,44 @@ with SIGKILL, so the hold stream stops while the controller is still active. Ins
 a second terminal, run the `release --arm <side>` command above for the arm it names (or deactivate it with your own
 tooling, or press the E-stop). The client sees the controller inactive and finishes by itself; press Enter in its
 terminal only if it keeps waiting after you handled it.
+
+## 12. Optional: watch the run in a browser
+
+**You can skip this section.** Nothing in sections 1 to 11 needs it, and the client works exactly the same with or
+without it.
+
+The viewer is a web page that shows a run while it happens (and afterwards): the three camera images the policy gets
+(2 per second), every joint and gripper of both arms by name, what the policy planned and what was sent to the arms. It
+only reads the files the client writes into `robot_runs`; it never talks to the robot or the policy server and never
+moves anything.
+
+Start it from a second terminal in the openpi root, then open <http://localhost:8765> in a browser on the laptop:
+
+```bash
+docker compose -f examples/ebim_task2/compose.robot_client.yml --profile viewer up -d viewer
+```
+
+Stop it when you are done (this takes about 10 seconds):
+
+```bash
+docker compose -f examples/ebim_task2/compose.robot_client.yml --profile viewer stop viewer
+```
+
+**Never use `down` here** (`docker compose ... down`): it can also stop and remove the running client container. If you
+set `OUT_DIR` for the client (section 4.3), set the same `OUT_DIR` when you start the viewer.
+
+- **CPU.** A browser competes with the client for the laptop's CPU (section 9). If a second machine is at hand, open the
+  page there (below). On the robot laptop keep only this one tab open, and close it if you see
+  `command streamer unhealthy`.
+- **What you see when.** An episode appears only after you press Enter at `Press Enter to start the policy`. Before that
+  the page shows the `check-obs` snapshots (Step 1). The page follows the newest running episode by itself.
+- **From another machine.** Start it with `VIEWER_HOST=0.0.0.0` in front of the `up` command
+  (`VIEWER_HOST=0.0.0.0 docker compose -f examples/ebim_task2/compose.robot_client.yml --profile viewer up -d viewer`)
+  and open `http://<laptop ip>:8765`. Or keep the default and tunnel from the other machine:
+  `ssh -L 8765:localhost:8765 <user>@<laptop>`, then open <http://localhost:8765> there.
+- **If the page does not open**, look at
+  `docker compose -f examples/ebim_task2/compose.robot_client.yml --profile viewer logs viewer`. If it says the port
+  is taken (`cannot listen on 127.0.0.1:8765`), stop it, start it again with `VIEWER_PORT=8766` in front of the `up`
+  command and open <http://localhost:8766>.
+- **If it still does not work, carry on without it.** The client is not affected; everything the page shows is also in
+  the run folder you send us.

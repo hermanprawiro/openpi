@@ -24,6 +24,14 @@
 #   docker compose -f examples/ebim_task2/compose.robot_client.yml --profile dev up -d fake-robot stub-server
 #   docker compose -f examples/ebim_task2/compose.robot_client.yml run --rm robot-client check-obs
 #   docker compose -f examples/ebim_task2/compose.robot_client.yml --profile dev down
+#
+# Viewer (optional, profile `viewer`; README_ROBOT_CLIENT.md section 12): a read-only web page over ${OUT_DIR}
+# (mounted read-only; it never talks to ROS or the policy server). Start it next to a client command and open
+# http://localhost:8765 (VIEWER_PORT changes the port, VIEWER_HOST=0.0.0.0 makes it reachable from other machines):
+#   docker compose -f examples/ebim_task2/compose.robot_client.yml --profile viewer up -d viewer
+#   docker compose -f examples/ebim_task2/compose.robot_client.yml --profile viewer stop viewer
+# Stop it with `stop viewer` (takes about 10 s), never `down`: `down` can also stop and remove a running robot-client
+# container.
 
 x-robot-client-image: &robot-client-image
   build:
@@ -67,3 +75,11 @@ services:
     environment:
       - FASTRTPS_DEFAULT_PROFILES_FILE=/app/robot_client/fastdds_udp_only.xml
     command: python3 -m robot_client.stub_server --port ${POLICY_SERVER_PORT:-8000}
+
+  viewer:
+    <<: *robot-client-image
+    profiles: [viewer]
+    network_mode: host
+    volumes:
+      - ${OUT_DIR:-./robot_runs}:/out:ro
+    command: python3 -m robot_client.viewer --runs /out --host ${VIEWER_HOST:-127.0.0.1} --port ${VIEWER_PORT:-8765}

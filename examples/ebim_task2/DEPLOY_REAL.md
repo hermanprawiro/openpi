@@ -165,6 +165,18 @@ tar czf munich_robot_runs.tar.gz -C examples/ebim_task2 robot_runs
 Send us `munich_robot_runs.tar.gz`, the `script` transcript and your notes
 ([README_ROBOT_CLIENT.md §10](README_ROBOT_CLIENT.md#10-what-to-send-us)).
 
+To look through the runs afterwards (for us; the operator does not need this), unpack the archive and start the
+viewer from the host, no Docker needed (numpy required; pyyaml optional, for the settings summary), then open
+<http://localhost:8765>:
+
+```bash
+tar xzf munich_robot_runs.tar.gz -C /some/dir
+cd examples/ebim_task2 && python3 -m robot_client.viewer --runs /some/dir/robot_runs
+```
+
+It only reads the folder. The same page can run live next to the client:
+[README_ROBOT_CLIENT.md §12](README_ROBOT_CLIENT.md#12-optional-watch-the-run-in-a-browser).
+
 ## 5. Swapping in another checkpoint
 
 Only the server changes. The client image, its YAML and the commands above stay as they are.
