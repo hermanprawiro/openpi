@@ -428,10 +428,13 @@ async function pollEpisode(again) {
   const last = lastStep();
   const lastK = state.chunks.length ? state.chunks[state.chunks.length - 1].k : -1;
   const base = epUrl();
+  // The catch-up read (again === false) is the last one for this episode: `fresh` stops the server from answering
+  // with the alignment of the poll just before it, which would drop the final records.
+  const fresh = again === false ? '&fresh=1' : '';
   const got = await Promise.all([
-    api('steps', base + '/steps?from=' + (last === null ? 0 : last + 1)),
+    api('steps', base + '/steps?from=' + (last === null ? 0 : last + 1) + fresh),
     api('chunks', base + '/chunks?from=' + (lastK + 1)),
-    api('summary', base + '/summary'),
+    api('summary', base + '/summary' + (fresh ? '?fresh=1' : '')),
   ]);
   if (gen !== epGen) return;
   applySteps(got[0]);

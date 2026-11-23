@@ -494,6 +494,25 @@ def test_requests_of_one_poll_share_one_alignment(tmp_path, serve, monkeypatch):
     assert [s["step"] for s in more["steps"]] == [new_step]
 
 
+def test_fresh_read_does_not_reuse_a_shorter_alignment(tmp_path, serve, monkeypatch):
+    """The page's catch-up read at episode end (`fresh=1`) must see the final records, although it lands within
+    ALIGN_SHARE_S of the poll before it (there is no later poll to bring them)."""
+    run = make_run(tmp_path, end=None)
+    steps_path = run / "episode_000" / "steps.jsonl"
+    calls = _count_align(monkeypatch)
+    client = serve()
+    base = "/api/runs/run_test/episode_000"
+
+    _, first = client.get(f"{base}/steps?from=0")
+    n = len(first["steps"])
+    last_step = _append_step(steps_path)  # the final tick, written just before episode_end
+    _, more = client.get(f"{base}/steps?from={n}&fresh=1")
+    _, summary = client.get(f"{base}/summary?fresh=1")
+    assert [s["step"] for s in more["steps"]] == [last_step]
+    assert calls == [n, n + 1]  # the summary reuses the fresh alignment, which covers every record
+    assert summary["alignment"]["chunks"]
+
+
 def test_steps_reports_age_of_newest_write(tmp_path, serve):
     run = make_run(tmp_path, end=None)
     steps_path = run / "episode_000" / "steps.jsonl"

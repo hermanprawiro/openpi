@@ -47,7 +47,8 @@ JPEG_EOI = b"\xff\xd9"
 DEFAULT_ALIGN = {"mode": "sync", "execute_horizon": 30, "active_arms": ["left", "right"]}
 # The page sends /steps, /chunks and /summary of one poll in parallel, while the client keeps appending steps: an
 # alignment younger than this is reused for a longer steps.jsonl (the newer steps come with the next poll), so a poll
-# aligns once, not once per request. Well under the page's 500 ms poll period.
+# aligns once, not once per request. Well under the page's 500 ms poll period. A `fresh=1` request (the page's one
+# catch-up read when an episode or run ends, which no later poll follows) never reuses a shorter alignment.
 ALIGN_SHARE_S = 0.25
 
 
@@ -81,8 +82,9 @@ class _Episode:
         self._summary_for: tuple | None = None
         self._summary: bytes = b""
 
-    def _read(self, align_args: dict) -> tuple[list[dict], dict | None, viewer_align.Alignment]:
-        """steps, chunks, alignment: the steps and chunks the alignment was computed from (see ALIGN_SHARE_S)."""
+    def _read(self, align_args: dict, *, fresh: bool = False) -> tuple[list[dict], dict | None, viewer_align.Alignment]:
+        """steps, chunks, alignment: the steps and chunks the alignment was computed from (see ALIGN_SHARE_S;
+        `fresh` covers every record read)."""
         steps = self.steps.read()  # before chunks: chunks are at least as new as steps
         chunks = self.chunks.read()
         cached = self._aligned_for
@@ -90,16 +92,16 @@ class _Episode:
             n, aligned_chunks, _, at = cached
             if n == len(steps) and aligned_chunks is chunks:
                 return steps, chunks, self._alignment
-            if n <= len(steps) and time.monotonic() - at < ALIGN_SHARE_S:
+            if not fresh and n <= len(steps) and time.monotonic() - at < ALIGN_SHARE_S:
                 return steps[:n], aligned_chunks, self._alignment
         self._alignment = viewer_align.align(steps, chunks, **align_args)
         self._aligned_for = (len(steps), chunks, dict(align_args), time.monotonic())
         return steps, chunks, self._alignment
 
-    def read(self, align_args: dict) -> tuple[list[dict], dict | None, viewer_align.Alignment]:
+    def read(self, align_args: dict, *, fresh: bool = False) -> tuple[list[dict], dict | None, viewer_align.Alignment]:
         """steps, chunks, alignment."""
         with self.lock:
-            return self._read(align_args)
+            return self._read(align_args, fresh=fresh)
 
     def read_chunks(self) -> dict | None:
         """The latest chunks.npz, without aligning (`/chunks` does not need the alignment)."""
@@ -119,10 +121,10 @@ class _Episode:
             self._images_for = key
         return key, self._images
 
-    def summary_body(self, align_args: dict, episode_json: bytes) -> bytes:
+    def summary_body(self, align_args: dict, episode_json: bytes, *, fresh: bool = False) -> bytes:
         """The encoded `/summary` response; `episode_json` (cheap, depends on events.log) is spliced in front."""
         with self.lock:
-            steps, _, alignment_obj = self._read(align_args)
+            steps, _, alignment_obj = self._read(align_args, fresh=fresh)
             image_key, images = self._image_index()
             key = (
                 len(steps),
@@ -188,6 +190,10 @@ def _from_param(query: dict) -> int:
         return max(0, int(query.get("from", ["0"])[0]))
     except ValueError:
         return 0
+
+
+def _fresh_param(query: dict) -> bool:
+    return query.get("fresh", ["0"])[0] == "1"
 
 
 def _read_json_file(path: Path):
@@ -318,11 +324,13 @@ class Handler(BaseHTTPRequestHandler):
             ep_dir = self._episode_dir(parts[1], parts[2])
             run_dir = ep_dir.parent
             if parts[3] == "steps":
-                return self._send_json(self._steps(run_dir, ep_dir, _from_param(query)))
+                return self._send_json(self._steps(run_dir, ep_dir, _from_param(query), fresh=_fresh_param(query)))
             if parts[3] == "chunks":
                 return self._send_json(self._chunks(ep_dir, _from_param(query)))
             if parts[3] == "summary":
-                return self._send(200, "application/json", self._summary_body(run_dir, ep_dir))
+                return self._send(
+                    200, "application/json", self._summary_body(run_dir, ep_dir, fresh=_fresh_param(query))
+                )
         raise _NotFoundError
 
     def _align_args(self, run_dir: Path) -> dict:
@@ -359,11 +367,11 @@ class Handler(BaseHTTPRequestHandler):
             "live": live,
         }
 
-    def _read_episode(self, run_dir: Path, ep_dir: Path):
-        return self.server.episode(ep_dir).read(self._align_args(run_dir))
+    def _read_episode(self, run_dir: Path, ep_dir: Path, *, fresh: bool = False):
+        return self.server.episode(ep_dir).read(self._align_args(run_dir), fresh=fresh)
 
-    def _steps(self, run_dir: Path, ep_dir: Path, first: int) -> dict:
-        steps, _, alignment = self._read_episode(run_dir, ep_dir)
+    def _steps(self, run_dir: Path, ep_dir: Path, first: int, *, fresh: bool = False) -> dict:
+        steps, _, alignment = self._read_episode(run_dir, ep_dir, fresh=fresh)
         start = len(steps)  # records are in step order: walk back to the first one >= `first` (a poll asks for few)
         while start > 0 and not (isinstance(steps[start - 1].get("step"), int) and steps[start - 1]["step"] < first):
             start -= 1
@@ -399,11 +407,11 @@ class Handler(BaseHTTPRequestHandler):
                 )
         return {"chunks": out}
 
-    def _summary_body(self, run_dir: Path, ep_dir: Path) -> bytes:
+    def _summary_body(self, run_dir: Path, ep_dir: Path, *, fresh: bool = False) -> bytes:
         events = viewer_data.read_events(run_dir)
         episodes = viewer_data.episode_list(run_dir, events, viewer_data.run_is_live(run_dir, events=events))
         entry = next((e for e in episodes if e["name"] == ep_dir.name), None)
-        return self.server.episode(ep_dir).summary_body(self._align_args(run_dir), _json_bytes(entry))
+        return self.server.episode(ep_dir).summary_body(self._align_args(run_dir), _json_bytes(entry), fresh=fresh)
 
     # ---- images ----
 
