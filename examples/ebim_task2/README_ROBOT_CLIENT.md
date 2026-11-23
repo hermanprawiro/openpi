@@ -783,7 +783,7 @@ Start it from a second terminal in the openpi root, then open <http://localhost:
 docker compose -f examples/ebim_task2/compose.robot_client.yml --profile viewer up -d viewer
 ```
 
-Stop it when you are done (this takes about 10 seconds):
+Stop it when you are done:
 
 ```bash
 docker compose -f examples/ebim_task2/compose.robot_client.yml --profile viewer stop viewer
@@ -796,10 +796,17 @@ set `OUT_DIR` for the client (section 4.3), set the same `OUT_DIR` when you star
   page there (below). On the robot laptop keep only this one tab open, and close it if you see
   `command streamer unhealthy`.
 - **What you see when.** An episode appears only after you press Enter at `Press Enter to start the policy`. Before that
-  the page shows the `check-obs` snapshots (Step 1). The page follows the newest running episode by itself.
+  the page shows the `check-obs` snapshots (Step 1). While `LIVE follow` is on (it is when you open the page), the page
+  follows the newest running episode by itself: a new run (for example `run` after `run --dry-run`), the same
+  `--run-name` started again, and the next episode all open without reloading. When the run ends the button reads
+  `run ended`; the next run you start still opens by itself. Moving the cursor back (or picking an older episode)
+  turns follow off: nothing moves then, and a bar `run <name> is live — click to follow` appears while a run is
+  running; click it to follow again. An amber `last step N s ago` next to the button means the running episode has
+  written no step for a few seconds: look at the client's terminal (it may be stuck or have been killed).
 - **From another machine.** Start it with `VIEWER_HOST=0.0.0.0` in front of the `up` command
   (`VIEWER_HOST=0.0.0.0 docker compose -f examples/ebim_task2/compose.robot_client.yml --profile viewer up -d viewer`)
-  and open `http://<laptop ip>:8765`. Or keep the default and tunnel from the other machine:
+  and open `http://<laptop ip>:8765`. Anyone on that network can then open the page and see the run's images and
+  joint data; there is no password. Or keep the default and tunnel from the other machine:
   `ssh -L 8765:localhost:8765 <user>@<laptop>`, then open <http://localhost:8765> there.
 - **If the page does not open**, look at
   `docker compose -f examples/ebim_task2/compose.robot_client.yml --profile viewer logs viewer`. If it says the port

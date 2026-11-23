@@ -30,8 +30,7 @@
 # http://localhost:8765 (VIEWER_PORT changes the port, VIEWER_HOST=0.0.0.0 makes it reachable from other machines):
 #   docker compose -f examples/ebim_task2/compose.robot_client.yml --profile viewer up -d viewer
 #   docker compose -f examples/ebim_task2/compose.robot_client.yml --profile viewer stop viewer
-# Stop it with `stop viewer` (takes about 10 s), never `down`: `down` can also stop and remove a running robot-client
-# container.
+# Stop it with `stop viewer`, never `down`: `down` can also stop and remove a running robot-client container.
 
 x-robot-client-image: &robot-client-image
   build:
@@ -82,4 +81,5 @@ services:
     network_mode: host
     volumes:
       - ${OUT_DIR:-./robot_runs}:/out:ro
+    stop_signal: SIGINT  # the viewer is PID 1: SIGINT (Ctrl-C) stops it at once; SIGTERM would wait for the 10 s kill
     command: python3 -m robot_client.viewer --runs /out --host ${VIEWER_HOST:-127.0.0.1} --port ${VIEWER_PORT:-8765}
