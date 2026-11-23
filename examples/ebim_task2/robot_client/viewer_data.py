@@ -70,22 +70,49 @@ def _mtime(path: Path) -> float | None:
         return None
 
 
-def run_is_live(run_dir: Path, now: float | None = None) -> bool:
-    """`events.log` has run_start and no run_end, and it (or the last episode's steps.jsonl) was written recently."""
-    now = time.time() if now is None else now
-    kinds = {e.get("kind") for e in read_events(run_dir)}
-    if "run_start" not in kinds or "run_end" in kinds:
-        return False
+def _last_run_start(events: list[dict]) -> int | None:
+    """Position of the last `run_start` in `events`: a run folder reused by `run --run-name NAME` holds one
+    run_start ... run_end pair per run (events.log is append-only), and only the last one can still be running."""
+    for pos in range(len(events) - 1, -1, -1):
+        if events[pos].get("kind") == "run_start":
+            return pos
+    return None
+
+
+def _newest_activity(run_dir: Path) -> float | None:
+    """mtime of events.log or of the last episode's steps.jsonl, whichever is newer."""
     episodes = _episode_dirs(run_dir)
     stamps = [_mtime(run_dir / "events.log")]
     if episodes:
         stamps.append(_mtime(episodes[-1] / "steps.jsonl"))
-    newest = max((s for s in stamps if s is not None), default=None)
-    return newest is not None and now - newest <= LIVE_STALE_S
+    return max((s for s in stamps if s is not None), default=None)
+
+
+def run_state(run_dir: Path, events: list[dict] | None = None, now: float | None = None) -> dict:
+    """`live`: the last `run_start` has no `run_end` after it, and events.log (or the last episode's steps.jsonl)
+    was written recently. `started`: wall time of the last run_start (None without one). `age_s`: seconds since
+    that newest write (None if neither file exists)."""
+    now = time.time() if now is None else now
+    events = read_events(run_dir) if events is None else events
+    start = _last_run_start(events)
+    newest = _newest_activity(Path(run_dir))
+    age = None if newest is None else max(0.0, now - newest)
+    open_run = start is not None and not any(e.get("kind") == "run_end" for e in events[start + 1 :])
+    started = events[start].get("wall") if start is not None else None
+    return {
+        "live": open_run and age is not None and age <= LIVE_STALE_S,
+        "started": started if isinstance(started, int | float) else None,
+        "age_s": age,
+    }
+
+
+def run_is_live(run_dir: Path, now: float | None = None, events: list[dict] | None = None) -> bool:
+    """See `run_state`."""
+    return run_state(run_dir, events, now)["live"]
 
 
 def list_runs(root: Path, now: float | None = None) -> list[dict]:
-    """Run directories under `root`, newest first: `{"name", "kind", "mtime", "live"}`."""
+    """Run directories under `root`, newest first: `{"name", "kind", "mtime", "live", "started", "age_s"}`."""
     now = time.time() if now is None else now
     try:
         dirs = [p for p in Path(root).iterdir() if p.is_dir()]
@@ -102,7 +129,7 @@ def list_runs(root: Path, now: float | None = None) -> list[dict]:
             kind = "check-obs"
         else:
             kind = "other"
-        runs.append({"name": run_dir.name, "kind": kind, "mtime": mtime, "live": run_is_live(run_dir, now)})
+        runs.append({"name": run_dir.name, "kind": kind, "mtime": mtime, **run_state(run_dir, now=now)})
     runs.sort(key=lambda r: (r["mtime"], r["name"]), reverse=True)
     return runs
 
@@ -156,7 +183,12 @@ def _read_json(path: Path) -> dict | None:
 
 def episode_list(run_dir: Path, events: list[dict], run_live: bool) -> list[dict]:  # noqa: FBT001
     """One entry per `episode_NNN/` directory. Ending from the `episode_end` event (or a following `interrupted`
-    event), outcome from result.json (else the `outcome` event)."""
+    event), outcome from result.json (else the `outcome` event). Only an episode of the last run (started after the
+    last `run_start`) can be live: an earlier run's episode without an ending was cut off by a killed client."""
+    last_start = _last_run_start(events)
+    last_start = -1 if last_start is None else last_start
+    started_before = [e.get("episode") for e in events[: last_start + 1] if e.get("kind") == "episode_start"]
+    newest_before = max((i for i in started_before if isinstance(i, int)), default=-1)
     entries = []
     for ep_dir in _episode_dirs(Path(run_dir)):
         index = int(_EPISODE_DIR.match(ep_dir.name).group(1))
@@ -179,11 +211,13 @@ def episode_list(run_dir: Path, events: list[dict], run_live: bool) -> list[dict
             ended_by, reason = end.get("ended_by"), end.get("reason")
         elif start_pos is not None:
             for event in events[start_pos + 1 :]:
-                if event.get("kind") == "episode_start":
+                if event.get("kind") in ("episode_start", "run_start"):
                     break
                 if event.get("kind") == "interrupted":
                     ended_by, reason = "interrupted", event.get("note")
                     break
+        # no episode_start yet (the directory is created just before it): new iff numbered after the earlier runs'
+        current = start_pos > last_start if start_pos is not None else index > newest_before
         result = _read_json(ep_dir / "result.json")
         outcome = result.get("outcome") if result else None
         if outcome is None and outcome_event is not None:
@@ -196,7 +230,7 @@ def episode_list(run_dir: Path, events: list[dict], run_live: bool) -> list[dict
                 "ended_by": ended_by,
                 "reason": reason,
                 "outcome": outcome,
-                "live": ended_by is None and run_live,
+                "live": ended_by is None and run_live and current,
                 "has_result": result is not None,
             }
         )

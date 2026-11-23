@@ -328,7 +328,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _run_info(self, run_dir: Path) -> dict:
         events = viewer_data.read_events(run_dir)
-        live = viewer_data.run_is_live(run_dir)
+        live = viewer_data.run_is_live(run_dir, events=events)
         config = self.server.config(run_dir)
         if config is not None:
             config = {**config, "safety": _scalar_safety(config["safety"])}
@@ -378,7 +378,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _summary_body(self, run_dir: Path, ep_dir: Path) -> bytes:
         events = viewer_data.read_events(run_dir)
-        episodes = viewer_data.episode_list(run_dir, events, viewer_data.run_is_live(run_dir))
+        episodes = viewer_data.episode_list(run_dir, events, viewer_data.run_is_live(run_dir, events=events))
         entry = next((e for e in episodes if e["name"] == ep_dir.name), None)
         return self.server.episode(ep_dir).summary_body(self._align_args(run_dir), _json_bytes(entry))
 

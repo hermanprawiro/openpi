@@ -247,3 +247,70 @@ def test_fixture_nan_t_request_and_hold(tmp_path):
     assert np.isnan(data["t_request"][0])
     steps = viewer_data.StepsTail(run / "episode_000" / "steps.jsonl").read()
     assert {s["mode"] for s in steps[25:35]} == {"hold"}
+
+
+# ---- a run folder reused by a second `run --run-name NAME` (events.log is append-only) ----
+
+
+def _live_names(run):
+    events = viewer_data.read_events(run)
+    return {e["name"]: e["live"] for e in viewer_data.episode_list(run, events, viewer_data.run_is_live(run))}
+
+
+def test_reused_run_folder_is_live_again(tmp_path):
+    run = make_run(tmp_path, "run_r")  # run_start, episode_000, run_end
+    assert viewer_data.run_is_live(run) is False
+
+    make_run(tmp_path, "run_r", end=None, index=1)  # a second run_start, episode_001 still running
+
+    kinds = [e["kind"] for e in viewer_data.read_events(run)]
+    assert kinds.count("run_start") == 2
+    assert kinds.count("run_end") == 1
+    assert viewer_data.run_is_live(run) is True
+    assert viewer_data.list_runs(tmp_path)[0]["live"] is True
+    assert _live_names(run) == {"episode_000": False, "episode_001": True}
+
+    with open(run / "events.log", "a") as f:
+        f.write(json.dumps({"wall": time.time(), "kind": "run_end"}) + "\n")
+    assert viewer_data.run_is_live(run) is False
+    assert _live_names(run) == {"episode_000": False, "episode_001": False}
+
+
+def test_reused_after_crash_old_episode_not_live(tmp_path):
+    run = make_run(tmp_path, "run_c", end=None)  # killed client: no episode_end, no run_end
+    make_run(tmp_path, "run_c", end=None, index=1)
+
+    assert viewer_data.run_is_live(run) is True
+    assert _live_names(run) == {"episode_000": False, "episode_001": True}
+
+
+def test_reused_folder_at_start_gate(tmp_path):
+    run = make_run(tmp_path, "run_g")
+    with open(run / "events.log", "a") as f:
+        f.write(json.dumps({"wall": time.time(), "kind": "run_start"}) + "\n")
+
+    assert viewer_data.run_is_live(run) is True
+    assert _live_names(run) == {"episode_000": False}
+
+
+def test_interrupted_in_a_later_run_is_not_the_old_episode(tmp_path):
+    run = make_run(tmp_path, "run_k", end=None)  # killed mid-episode
+    with open(run / "events.log", "a") as f:
+        for kind in ("run_start", "interrupted", "run_end"):
+            f.write(json.dumps({"wall": time.time(), "kind": kind, "note": "x"}) + "\n")
+
+    ep = viewer_data.episode_list(run, viewer_data.read_events(run), run_live=False)[0]
+    assert ep["ended_by"] is None
+
+
+def test_list_runs_started_and_age(tmp_path):
+    run = make_run(tmp_path, "run_a", end=None)
+    now = time.time()
+    entry = viewer_data.list_runs(tmp_path, now + 30)[0]
+    starts = [e["wall"] for e in viewer_data.read_events(run) if e["kind"] == "run_start"]
+    assert entry["started"] == starts[-1]
+    assert 29 <= entry["age_s"] <= 40
+    (tmp_path / "run_x").mkdir()
+    other = next(r for r in viewer_data.list_runs(tmp_path) if r["name"] == "run_x")
+    assert other["started"] is None
+    assert other["age_s"] is None

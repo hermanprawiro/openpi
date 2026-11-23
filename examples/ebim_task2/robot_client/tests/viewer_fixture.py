@@ -37,11 +37,14 @@ def make_run(
     check_obs: bool = False,
     episodes: bool = True,
     hold_at: tuple[int, int] | None = None,
+    index: int = 0,
 ) -> Path:
     """Write one run folder `<out_dir>/<name>` and return it.
 
     `end`: "operator" (q at tick 100), "timeout" (the episode times out), "freeze" (the worker dies at tick 60),
     "interrupted" (Ctrl-C at tick 70) or None (a live run: nothing is written after the steps).
+    `index`: the episode number. Calling `make_run` again with the same `name` and the next `index` appends a second
+    run_start ... run_end to `events.log`, as `run --run-name NAME` does when it reuses a run folder.
     """
     if keys is None and end == "operator":
         keys = {QUIT_TICK: "q"}
@@ -75,9 +78,9 @@ def make_run(
                     run_dir / f"check_obs_{camera}.jpg", quality=90
                 )
         if episodes:
-            _episode(rec, rig, end, dry_run=dry_run)
+            _episode(rec, rig, end, dry_run=dry_run, index=index)
             if nan_t_request:
-                _nan_first_t_request(run_dir / "episode_000" / "chunks.npz")
+                _nan_first_t_request(run_dir / f"episode_{index:03d}" / "chunks.npz")
         if end:
             rec.event("run_end")
     finally:
@@ -85,10 +88,10 @@ def make_run(
     return run_dir
 
 
-def _episode(rec: RunRecorder, rig: Rig, end: str | None, *, dry_run: bool) -> None:
-    ep = rec.episode(0)
+def _episode(rec: RunRecorder, rig: Rig, end: str | None, *, dry_run: bool, index: int) -> None:
+    ep = rec.episode(index)
     rig.runner.recorder = ep
-    rec.event("episode_start", episode=0, generation=1, dry_run=dry_run)
+    rec.event("episode_start", episode=index, generation=index + 1, dry_run=dry_run)
     stream_stats = {"node": {}, "streamer": {"cycles": 0, "fault": None}}
     try:
         outcome = rig.run()
@@ -100,12 +103,12 @@ def _episode(rec: RunRecorder, rig: Rig, end: str | None, *, dry_run: bool) -> N
         ep._steps.close()  # noqa: SLF001 - a live run's files stay unfinished, but do not leak the handle
         return
     stats = {**outcome.stats, "ended_by": outcome.ended_by, "reason": outcome.reason, "dry_run": dry_run}
-    rec.event("episode_end", episode=0, ended_by=outcome.ended_by, reason=outcome.reason, steps=outcome.steps)
+    rec.event("episode_end", episode=index, ended_by=outcome.ended_by, reason=outcome.reason, steps=outcome.steps)
     if outcome.ended_by == "freeze":
         ep.finish("freeze", "", stats, stream_stats)
     else:
         ep.finish("s", "", stats, stream_stats)
-        rec.event("outcome", episode=0, outcome="s")
+        rec.event("outcome", episode=index, outcome="s")
 
 
 def _nan_first_t_request(path: Path) -> None:

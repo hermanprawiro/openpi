@@ -418,3 +418,19 @@ def test_odd_config_values_fall_back_to_defaults(tmp_path, serve, section, key, 
     status, summary = client.get(f"{base}/summary")
     assert status == 200
     assert summary["alignment"]["chunks"]
+
+
+def test_reused_run_folder_api(tmp_path, serve):
+    make_run(tmp_path, "run_r")
+    make_run(tmp_path, "run_r", end=None, index=1)
+    client = serve()
+
+    _, runs = client.get("/api/runs")
+    assert runs["runs"][0]["live"] is True
+    _, info = client.get("/api/runs/run_r")
+    assert info["live"] is True
+    assert [(e["name"], e["live"]) for e in info["episodes"]] == [("episode_000", False), ("episode_001", True)]
+    _, summary = client.get("/api/runs/run_r/episode_001/summary")
+    assert summary["episode"]["live"] is True
+    _, summary = client.get("/api/runs/run_r/episode_000/summary")
+    assert summary["episode"]["live"] is False
