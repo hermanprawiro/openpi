@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import sys
 import threading
+import time
 from urllib.parse import parse_qs
 from urllib.parse import unquote
 from urllib.parse import urlsplit
@@ -44,6 +45,10 @@ CONTENT_TYPES = {
 }
 JPEG_EOI = b"\xff\xd9"
 DEFAULT_ALIGN = {"mode": "sync", "execute_horizon": 30, "active_arms": ["left", "right"]}
+# The page sends /steps, /chunks and /summary of one poll in parallel, while the client keeps appending steps: an
+# alignment younger than this is reused for a longer steps.jsonl (the newer steps come with the next poll), so a poll
+# aligns once, not once per request. Well under the page's 500 ms poll period.
+ALIGN_SHARE_S = 0.25
 
 
 class _NotFoundError(Exception):
@@ -77,18 +82,29 @@ class _Episode:
         self._summary: bytes = b""
 
     def _read(self, align_args: dict) -> tuple[list[dict], dict | None, viewer_align.Alignment]:
+        """steps, chunks, alignment: the steps and chunks the alignment was computed from (see ALIGN_SHARE_S)."""
         steps = self.steps.read()  # before chunks: chunks are at least as new as steps
         chunks = self.chunks.read()
-        same = self._aligned_for
-        if same is None or same[0] != len(steps) or same[1] is not chunks or same[2] != align_args:
-            self._alignment = viewer_align.align(steps, chunks, **align_args)
-            self._aligned_for = (len(steps), chunks, dict(align_args))
+        cached = self._aligned_for
+        if cached is not None and cached[2] == align_args:
+            n, aligned_chunks, _, at = cached
+            if n == len(steps) and aligned_chunks is chunks:
+                return steps, chunks, self._alignment
+            if n <= len(steps) and time.monotonic() - at < ALIGN_SHARE_S:
+                return steps[:n], aligned_chunks, self._alignment
+        self._alignment = viewer_align.align(steps, chunks, **align_args)
+        self._aligned_for = (len(steps), chunks, dict(align_args), time.monotonic())
         return steps, chunks, self._alignment
 
     def read(self, align_args: dict) -> tuple[list[dict], dict | None, viewer_align.Alignment]:
         """steps, chunks, alignment."""
         with self.lock:
             return self._read(align_args)
+
+    def read_chunks(self) -> dict | None:
+        """The latest chunks.npz, without aligning (`/chunks` does not need the alignment)."""
+        with self.lock:
+            return self.chunks.read()
 
     def _image_index(self) -> tuple[tuple, dict[str, list[int]]]:
         """Adding a file updates its camera directory's mtime, so the directory mtimes are the cache key."""
@@ -304,7 +320,7 @@ class Handler(BaseHTTPRequestHandler):
             if parts[3] == "steps":
                 return self._send_json(self._steps(run_dir, ep_dir, _from_param(query)))
             if parts[3] == "chunks":
-                return self._send_json(self._chunks(run_dir, ep_dir, _from_param(query)))
+                return self._send_json(self._chunks(ep_dir, _from_param(query)))
             if parts[3] == "summary":
                 return self._send(200, "application/json", self._summary_body(run_dir, ep_dir))
         raise _NotFoundError
@@ -348,15 +364,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def _steps(self, run_dir: Path, ep_dir: Path, first: int) -> dict:
         steps, _, alignment = self._read_episode(run_dir, ep_dir)
+        start = len(steps)  # records are in step order: walk back to the first one >= `first` (a poll asks for few)
+        while start > 0 and not (isinstance(steps[start - 1].get("step"), int) and steps[start - 1]["step"] < first):
+            start -= 1
         out = []
-        for record, (chunk_k, row, clamped) in zip(steps, alignment.per_step, strict=True):
+        for record, (chunk_k, row, clamped) in zip(steps[start:], alignment.per_step[start:], strict=True):
             step = record.get("step")
             if isinstance(step, int) and step >= first:
                 out.append({**record, "chunk_k": chunk_k, "row": row, "clamped": bool(clamped)})
         return {"steps": out}
 
-    def _chunks(self, run_dir: Path, ep_dir: Path, first: int) -> dict:
-        _, chunks, _ = self._read_episode(run_dir, ep_dir)
+    def _chunks(self, ep_dir: Path, first: int) -> dict:
+        chunks = self.server.episode(ep_dir).read_chunks()
         out = []
         if chunks is not None:
             t_request = np.asarray(chunks["t_request"], dtype=np.float64)

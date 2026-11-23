@@ -1,6 +1,7 @@
 """Chunk alignment against episodes recorded by the real `Runner` (through `test_runner.Rig`) into a real
 `EpisodeRecorder`, read back with `StepsTail` / `ChunksCache` exactly as the viewer reads them."""
 
+import contextlib
 import copy
 import json
 from pathlib import Path
@@ -292,3 +293,72 @@ def test_to_json_is_plain(tmp_path):
     assert out["chunks"][1]["start_offset"] == {"left": None, "right": None}
     json.dumps(out, allow_nan=False)
     assert isinstance(out["chunks"][0]["start_offset"]["right"], float)
+
+
+# ----------------------------------------------------------------------------------------------------
+# Vectorised value checks == the per-record reference
+# ----------------------------------------------------------------------------------------------------
+
+
+def _odd_steps(steps):
+    """Copies with every odd shape a half-broken record could have, spread over run ticks."""
+    steps = copy.deepcopy(steps)
+    run = [i for i, s in enumerate(steps) if s["mode"] == "run"]
+    steps[run[0]]["action"] = None
+    steps[run[1]]["action"] = steps[run[1]]["action"][:5]  # short
+    steps[run[2]]["action"][3] = float("nan")
+    steps[run[3]]["waypoints"]["right"] = None
+    steps[run[4]]["waypoints"] = {}
+    steps[run[5]]["waypoints"]["left"] = steps[run[5]]["waypoints"]["left"][:3]  # short
+    steps[run[6]]["action"] = ["a"] * 16
+    steps[run[7]]["waypoints"]["left"][0] += 0.2  # clamped
+    steps[run[8]]["action"][9] += 0.01  # mismatch
+    steps[run[9]]["action"][9] = float("inf")
+    return steps
+
+
+@pytest.mark.parametrize("odd", [False, True])
+def test_vectorised_checks_equal_reference(tmp_path, monkeypatch, odd):
+    from robot_client import viewer_align
+
+    steps, chunks = _episode(make_run(tmp_path))
+    if odd:
+        steps = _odd_steps(steps)
+    else:
+        steps = copy.deepcopy(steps)
+        run = [i for i, s in enumerate(steps) if s["mode"] == "run"]
+        steps[run[0]]["waypoints"]["right"][1] += 0.3  # clamped
+        steps[run[1]]["action"][2] += 0.01  # mismatch
+        steps[run[2]]["action"][4] = float("inf")
+    arr = np.asarray(chunks["chunks"])
+    actions = [s.get("action") for s in steps]
+    rows = arr[[i % arr.shape[0] for i in range(len(steps))], [i % H for i in range(len(steps))]].astype(np.float64)
+    for i, a in enumerate(actions):  # most rows are the float32 copy of their action, as in chunks.npz
+        with contextlib.suppress(TypeError, ValueError):
+            rows[i] = np.asarray(a, dtype=np.float32)
+    rows[7, 3] += 0.01  # a mismatch
+    rows[8, 4] = actions[8][4] = float("inf")  # inf == inf matches, as in np.allclose
+    want_clamped = [viewer_align._clamped(s, ARMS) for s in steps]  # noqa: SLF001
+    want_match = [viewer_align._matches(a, row) for a, row in zip(actions, rows, strict=True)]  # noqa: SLF001
+    assert any(want_clamped)
+    assert any(want_match)
+    assert not all(want_match)
+    if not odd:  # well-formed records never take the per-record fallback
+
+        def boom(*a, **k):
+            raise AssertionError("fallback used")
+
+        monkeypatch.setattr(viewer_align, "_clamped", boom)
+        monkeypatch.setattr(viewer_align, "_matches", boom)
+
+    assert viewer_align._clamped_flags(steps, ARMS) == want_clamped  # noqa: SLF001
+    assert viewer_align._match_flags(actions, rows) == want_match  # noqa: SLF001
+    monkeypatch.undo()
+    al = _align(steps, chunks)
+    want = sum(
+        k is None or not viewer_align._matches(s.get("action"), arr[k, r])  # noqa: SLF001
+        for s, (k, r, _) in zip(steps, al.per_step, strict=True)
+        if s["mode"] == "run"
+    )
+    assert al.mismatches == want == (7 if odd else 3)  # the edited actions (and step 8's inf) differ from their rows
+    assert sum(c for _, _, c in al.per_step) == sum(want_clamped[i] for i, s in enumerate(steps) if s["mode"] == "run")

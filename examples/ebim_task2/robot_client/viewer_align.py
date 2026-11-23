@@ -97,6 +97,65 @@ def _matches(action, row: np.ndarray) -> bool:
         return False
 
 
+def _float_matrix(rows: list, min_width: int, max_width: int | None = None) -> np.ndarray | None:
+    """`rows` (lists of numbers) as an (n, width) float64 array, or None if any row is odd (ragged, non-numeric,
+    narrower than `min_width` or wider than `max_width`)."""
+    try:
+        out = np.asarray(rows, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if out.ndim != 2 or out.shape[0] != len(rows) or out.shape[1] < min_width:
+        return None
+    if max_width is not None and out.shape[1] > max_width:
+        return None
+    return out
+
+
+def _clamped_flags(steps: list[dict], active_arms: list[str]) -> list[bool]:
+    """`[_clamped(s, active_arms) for s in steps]`, vectorised; any odd record falls back to the per-record check."""
+    flags = np.zeros(len(steps), dtype=bool)
+    try:
+        for side in active_arms:
+            sl = layout.ARM_SLICES[side]
+            idx = [
+                i
+                for i, s in enumerate(steps)
+                if s.get("action") is not None and (s.get("waypoints") or {}).get(side) is not None
+            ]
+            if not idx:
+                continue
+            actions = _float_matrix([steps[i]["action"] for i in idx], sl.stop)
+            width = sl.stop - sl.start
+            waypoints = _float_matrix([steps[i]["waypoints"][side] for i in idx], width, width)
+            if actions is None or waypoints is None:
+                raise ValueError("odd record")
+            with np.errstate(invalid="ignore"):  # inf - inf: NaN counts as cut, as in `_clamped`
+                cut = ~np.all(np.abs(waypoints - actions[:, sl]) <= CLAMP_TOL, axis=1)
+            flags[np.asarray(idx)[cut]] = True
+    except (AttributeError, TypeError, ValueError):
+        return [_clamped(s, active_arms) for s in steps]
+    return flags.tolist()
+
+
+def _match_flags(actions: list, rows: np.ndarray) -> list[bool]:
+    """`[_matches(a, row) for a, row in zip(actions, rows)]`, vectorised; odd actions fall back per record."""
+    rows = np.asarray(rows, dtype=np.float64)
+    out = [False] * len(actions)
+    idx = [i for i, a in enumerate(actions) if a is not None]
+    if not idx:
+        return out
+    width = rows.shape[1] if rows.ndim == 2 else 0
+    matrix = _float_matrix([actions[i] for i in idx], width, width) if width else None
+    if matrix is None:
+        return [_matches(a, row) for a, row in zip(actions, rows, strict=True)]
+    sub = rows[idx]
+    with np.errstate(invalid="ignore"):  # inf - inf
+        ok = np.all((np.abs(matrix - sub) <= ACTION_ATOL) | (matrix == sub), axis=1)  # == np.allclose(rtol=0)
+    for i, v in zip(idx, ok.tolist(), strict=True):
+        out[i] = v
+    return out
+
+
 def align(
     steps: list[dict], chunks: dict | None, *, mode: str, execute_horizon: int, active_arms: list[str]
 ) -> Alignment:
@@ -198,7 +257,7 @@ def align(
                 if lo <= r < hi:
                     k_hit, r_hit = k, r
                     break
-            per_step.append((k_hit, r_hit, _clamped(s, active_arms)))
+            per_step.append((k_hit, r_hit, False))
     else:
         arrivals: dict[int, list[int]] = {}
         for k, idx in enumerate(receipt_index):
@@ -215,9 +274,21 @@ def align(
                 per_step.append((None, None, False))
                 continue
             k, r = queue.popleft() if queue else (None, None)
-            if k is None or not _matches(s.get("action"), arr[k, r]):
+            if k is None:
                 mismatches += 1
-            per_step.append((k, r, _clamped(s, active_arms)))
+            per_step.append((k, r, False))
+        checked = [i for i, (k, _, _) in enumerate(per_step) if k is not None]
+        if checked:
+            rows = arr[[per_step[i][0] for i in checked], [per_step[i][1] for i in checked]]
+            ok = _match_flags([steps[i].get("action") for i in checked], rows)
+            mismatches += ok.count(False)
+
+    # clamped: run ticks only (the others keep False)
+    run_ticks = [i for i, s in enumerate(steps) if s.get("mode") == "run"]
+    for i, c in zip(run_ticks, _clamped_flags([steps[i] for i in run_ticks], active_arms), strict=True):
+        if c:
+            k, r, _ = per_step[i]
+            per_step[i] = (k, r, True)
 
     for s, (k, _, clamped) in zip(steps, per_step, strict=True):
         if k is None:

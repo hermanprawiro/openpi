@@ -434,3 +434,60 @@ def test_reused_run_folder_api(tmp_path, serve):
     assert summary["episode"]["live"] is True
     _, summary = client.get("/api/runs/run_r/episode_000/summary")
     assert summary["episode"]["live"] is False
+
+
+# ---- per-poll cost on a live episode ----
+
+
+def _count_align(monkeypatch):
+    from robot_client import viewer_align
+
+    calls = []
+    real = viewer_align.align
+
+    def counted(*a, **k):
+        calls.append(len(a[0]))
+        return real(*a, **k)
+
+    monkeypatch.setattr(viewer_align, "align", counted)
+    return calls
+
+
+def test_chunks_does_not_align(tmp_path, serve, monkeypatch):
+    make_run(tmp_path)
+    calls = _count_align(monkeypatch)
+    status, body = serve().get("/api/runs/run_test/episode_000/chunks?from=0")
+    assert status == 200
+    assert body["chunks"]
+    assert calls == []
+
+
+def _append_step(steps_path):
+    last = json.loads(steps_path.read_text().splitlines()[-1])
+    last["step"] += 1
+    last["plan_step"] += 1
+    with open(steps_path, "a") as f:
+        f.write(json.dumps(last) + "\n")
+    return last["step"]
+
+
+def test_requests_of_one_poll_share_one_alignment(tmp_path, serve, monkeypatch):
+    run = make_run(tmp_path, end=None)  # live: steps.jsonl grows between the page's parallel requests
+    steps_path = run / "episode_000" / "steps.jsonl"
+    calls = _count_align(monkeypatch)
+    client = serve()
+    base = "/api/runs/run_test/episode_000"
+
+    _, first = client.get(f"{base}/steps?from=0")
+    n = len(first["steps"])
+    new_step = _append_step(steps_path)  # the client writes a step while the poll is in flight
+    _, summary = client.get(f"{base}/summary")
+    _, more = client.get(f"{base}/steps?from={n}")
+    assert calls == [n]  # one alignment for the whole poll
+    assert more["steps"] == []  # the new step comes with the next poll
+    assert summary["alignment"]["chunks"]
+
+    monkeypatch.setattr(viewer, "ALIGN_SHARE_S", 0.0)  # the next poll
+    _, more = client.get(f"{base}/steps?from={n}")
+    assert calls == [n, n + 1]
+    assert [s["step"] for s in more["steps"]] == [new_step]
