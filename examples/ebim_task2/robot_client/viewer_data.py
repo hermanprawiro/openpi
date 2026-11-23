@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import time
 import zipfile
+import zlib
 
 import numpy as np
 
@@ -126,25 +127,23 @@ def read_events(run_dir: Path) -> list[dict]:
 def config_summary(run_dir: Path) -> dict | None:
     """The config fields the page shows; `state.pin` keys (strings on disk) become ints. None if unavailable."""
     path = Path(run_dir) / "config.yaml"
-    try:
+    try:  # the whole body: a missing yaml, an unreadable file, a parse error or an odd structure all give None
         import yaml
 
         data = yaml.safe_load(path.read_text())
-    except (ImportError, OSError, ValueError):
+        if not isinstance(data, dict):
+            return None
+        inference = data.get("inference") or {}
+        pin = ((data.get("state") or {}).get("pin")) or {}
+        return {
+            "active_arms": data.get("active_arms"),
+            "mode": inference.get("mode"),
+            "execute_horizon": inference.get("execute_horizon"),
+            "pin": {int(k): v for k, v in pin.items()},
+            "safety": data.get("safety") or {},
+        }
+    except Exception:
         return None
-    except Exception:  # a yaml parse error
-        return None
-    if not isinstance(data, dict):
-        return None
-    inference = data.get("inference") or {}
-    pin = ((data.get("state") or {}).get("pin")) or {}
-    return {
-        "active_arms": data.get("active_arms"),
-        "mode": inference.get("mode"),
-        "execute_horizon": inference.get("execute_horizon"),
-        "pin": {int(k): v for k, v in pin.items()},
-        "safety": data.get("safety") or {},
-    }
 
 
 def _read_json(path: Path) -> dict | None:
@@ -267,7 +266,7 @@ class ChunksCache:
         for attempt in range(2):
             try:
                 value = self._load()
-            except (OSError, ValueError, zipfile.BadZipFile):
+            except (OSError, ValueError, KeyError, EOFError, zlib.error, zipfile.BadZipFile):
                 if attempt == 0:
                     time.sleep(_RETRY_PAUSE_S)
                 continue
