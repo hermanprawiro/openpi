@@ -140,7 +140,8 @@ def test_api_empty_episode(tmp_path, serve):
     (ep / "steps.jsonl").write_text("")
     (ep / "chunks.npz").write_bytes(b"")
     client = serve()
-    assert client.get("/api/runs/run_empty/episode_000/steps?from=0") == (200, {"steps": []})
+    status, steps = client.get("/api/runs/run_empty/episode_000/steps?from=0")
+    assert (status, steps["steps"]) == (200, [])
     assert client.get("/api/runs/run_empty/episode_000/chunks?from=0") == (200, {"chunks": []})
     status, summary = client.get("/api/runs/run_empty/episode_000/summary")
     assert status == 200
@@ -491,3 +492,17 @@ def test_requests_of_one_poll_share_one_alignment(tmp_path, serve, monkeypatch):
     _, more = client.get(f"{base}/steps?from={n}")
     assert calls == [n, n + 1]
     assert [s["step"] for s in more["steps"]] == [new_step]
+
+
+def test_steps_reports_age_of_newest_write(tmp_path, serve):
+    run = make_run(tmp_path, end=None)
+    steps_path = run / "episode_000" / "steps.jsonl"
+    old = steps_path.stat().st_mtime - 42
+    os.utime(steps_path, (old, old))
+    client = serve()
+    _, body = client.get("/api/runs/run_test/episode_000/steps?from=999999")
+    assert body["steps"] == []
+    assert 41 <= body["age_s"] < 60
+    steps_path.unlink()
+    _, body = client.get("/api/runs/run_test/episode_000/steps?from=0")
+    assert body["age_s"] is None

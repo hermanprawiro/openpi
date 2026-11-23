@@ -13,9 +13,10 @@
     <label class="field">Run <select id="run-select"></select></label>
     <span id="run-kind" class="muted"></span>
     <label class="field">Episode <select id="ep-select"></select></label>
-    <button id="follow" type="button" aria-pressed="false" title="Stick to the newest step of a live run">
-      <span class="dot" aria-hidden="true"></span>LIVE follow
+    <button id="follow" type="button" aria-pressed="false" data-state="off" title="Stick to the newest step of a live run">
+      <span class="dot" aria-hidden="true"></span><span id="follow-label">LIVE follow</span>
     </button>
+    <span id="live-age" class="note note-warn" role="status" hidden></span>
     <span id="follow-note" class="note"></span>
     <span id="net-note" class="note" role="status"></span>
   </div>
@@ -32,6 +33,7 @@
 </header>
 
 <div id="banners">
+  <button id="live-banner" type="button" class="banner banner-live" hidden></button>
   <div id="dry-banner" class="banner banner-dry" hidden>DRY RUN &mdash; the arms do not move; measured joints stay flat</div>
   <div id="gate-banner" class="banner banner-info" hidden></div>
 </div>

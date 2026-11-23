@@ -32,7 +32,9 @@
 //   chunks,      // /chunks entries (k, obs_step, t_request, t_receive, latency_ms, latency_steps, rows)
 //   summary,     // /summary or null
 //   cursor,      // current step number (a .step value)
-//   follow,      // true = stick to the newest step of a live run
+//   follow,      // true = follow the live run: stick to the newest step, open its new episodes, and switch to a
+//                //   newer live run when one starts (the selected run may have ended: the button then reads
+//                //   "run ended"). Off: nothing moves; a "run X is live — click to follow" banner offers it.
 //   selectedDim, // action/state dim shown in the chunk inspector (default 11)
 //   playing      // replay running
 // }
@@ -50,14 +52,16 @@ export const state = {
   chunks: [],
   summary: null,
   cursor: 0,
-  follow: false,
+  follow: true, // a fresh page (no #step in the URL) follows whatever run is live
   selectedDim: 11,
   playing: false,
 };
 
 const RUN_POLL_MS = 2000;
 const EPISODE_POLL_MS = 500;
-const LIST_POLL_MS = 5000;
+const LIST_POLL_MS = 5000; // always on: the page notices a new or resumed run while another one is shown
+const FRESH_S = 60; // a live run whose newest write is older than this loses to a fresher live run
+const STALE_STEP_S = 3; // following a live episode whose newest step is older than this: "last step N s ago"
 const PLAY_STEPS_PER_S = 20;
 const BIG_STEP = 20;
 const MINUS = '−';
@@ -219,7 +223,7 @@ let runTimer = null;
 let epTimer = null;
 let listTimer = null;
 let playTimer = null;
-let autoPicked = false; // the page may auto-select a live run once, until the user picks one
+let stepsAge = null; // {age: seconds since steps.jsonl was written (server clock), at: Date.now() of that reply}
 
 async function ensureLabels() {
   if (state.labels.length) return;
@@ -237,16 +241,45 @@ async function loadRuns() {
     return;
   }
   state.runs = data.runs;
-  // Nothing chosen yet: a live run (the operator watching a run that just started) is selected for them.
-  if (!state.run && !autoPicked) {
-    const live = state.runs.find(function (r) { return r.live; });
-    if (live) {
-      autoPicked = true;
-      await selectRun(live.name, {});
-      return;
-    }
-  }
   emit('run');
+  await followRuns();
+}
+
+function startedAt(r) {
+  if (typeof r.started === 'number') return r.started;
+  return typeof r.mtime === 'number' ? r.mtime : 0;
+}
+
+// The run the page follows: the most recently started live run, preferring runs written to in the last FRESH_S
+// seconds (a killed client leaves its run "live" for hours; the client is also silent at the start gate).
+export function followTarget() {
+  const live = state.runs.filter(function (r) { return r.live; });
+  if (!live.length) return null;
+  const fresh = live.filter(isFresh);
+  const pool = fresh.length ? fresh : live;
+  return pool.reduce(function (best, r) { return startedAt(r) > startedAt(best) ? r : best; });
+}
+
+function listEntry(name) {
+  return state.runs.find(function (r) { return r.name === name; }) || null;
+}
+
+function isFresh(r) {
+  return typeof r.age_s !== 'number' || r.age_s <= FRESH_S;
+}
+
+// After a run list refresh: follow a newer live run, or catch up with the selected run's liveness.
+async function followRuns() {
+  const target = followTarget();
+  const cur = state.run ? listEntry(state.run) : null;
+  // A stale "live" run (a killed client) that started before the selected one is not worth leaving it for.
+  const worth = target && (!cur || isFresh(target) || startedAt(target) > startedAt(cur));
+  if (state.follow && worth && target.name !== state.run) {
+    await selectRun(target.name, { follow: true });
+    return;
+  }
+  // The selected run went live again (`run --run-name` reused its folder) or ended while its own poll was off.
+  if (cur && state.runInfo && !!cur.live !== runLive()) await refreshRun();
 }
 
 function resetEpisodeData() {
@@ -255,8 +288,11 @@ function resetEpisodeData() {
   state.chunks = [];
   state.summary = null;
   state.cursor = 0;
+  stepsAge = null;
 }
 
+// opts: {ep, step, follow}. follow true/false sets it; omitted, the page follows the run iff it is live (and no
+// step was asked for).
 async function selectRun(name, opts) {
   opts = opts || {};
   const gen = ++runGen;
@@ -265,7 +301,7 @@ async function selectRun(name, opts) {
   state.run = name || null;
   state.runInfo = null;
   resetEpisodeData();
-  state.follow = false;
+  state.follow = opts.follow != null ? !!opts.follow : false;
   clearNotes(['run', 'steps', 'chunks', 'summary']);
   emit('selection');
   if (!state.run) {
@@ -277,7 +313,7 @@ async function selectRun(name, opts) {
   if (gen !== runGen) return;
   if (info) {
     state.runInfo = info;
-    state.follow = opts.step != null ? false : !!info.live;
+    if (opts.follow == null) state.follow = opts.step == null && !!info.live;
     emit('run');
     const eps = info.episodes || [];
     if (eps.length) {
@@ -300,6 +336,7 @@ async function loadEpisode(name, startStep) {
   state.chunks = [];
   state.summary = null;
   state.cursor = 0;
+  stepsAge = null;
   clearNotes(['steps', 'chunks', 'summary']);
   emit('selection');
   const base = epUrl();
@@ -312,6 +349,7 @@ async function loadEpisode(name, startStep) {
   applySteps(got[0]);
   applyChunks(got[1]);
   if (got[2]) state.summary = got[2];
+  noteStepsAge(got[0]);
   const last = lastStep();
   if (last !== null) {
     if (startStep != null && !isNaN(startStep)) state.cursor = clampStep(startStep);
@@ -335,6 +373,16 @@ function applySteps(resp) {
     }
   });
   return added;
+}
+
+function noteStepsAge(resp) {
+  if (resp && typeof resp.age_s === 'number') stepsAge = { age: resp.age_s, at: Date.now() };
+}
+
+// Seconds since the newest step was written, while following a live episode that has steps; otherwise null.
+function liveStepAge() {
+  if (!state.follow || !stepsAge || !state.steps.length || !runLive() || !epLive()) return null;
+  return stepsAge.age + (Date.now() - stepsAge.at) / 1000;
 }
 
 function applyChunks(resp) {
@@ -389,6 +437,7 @@ async function pollEpisode(again) {
   applySteps(got[0]);
   applyChunks(got[1]);
   if (got[2]) state.summary = got[2];
+  noteStepsAge(got[0]);
   const newest = lastStep();
   if (state.follow && newest !== null) state.cursor = newest;
   emit('data');
@@ -415,9 +464,7 @@ function schedule() {
   if (ep && !epTimer) epTimer = setTimeout(episodeTick, EPISODE_POLL_MS);
   if (!ep && epTimer) { clearTimeout(epTimer); epTimer = null; }
 
-  const list = !state.run;
-  if (list && !listTimer) listTimer = setTimeout(listTick, LIST_POLL_MS);
-  if (!list && listTimer) { clearTimeout(listTimer); listTimer = null; }
+  if (!listTimer) listTimer = setTimeout(listTick, LIST_POLL_MS);
 }
 
 async function runTick() {
@@ -483,12 +530,14 @@ export function setFollow(on) {
     stopPlay();
     const last = lastStep();
     if (last !== null) state.cursor = last;
-    // Catch up with the run right away, then the timers keep it current.
-    if (runLive()) {
-      refreshRun().then(function () { return pollEpisode(); }).then(schedule).catch(function (e) {
-        console.error('follow catch-up failed', e);
-      });
-    }
+    // Catch up right away (a newer live run, or this run's newest episode), then the timers keep it current.
+    const gen = runGen;
+    followRuns().then(function () {
+      if (gen !== runGen || !state.run) return null; // switched to another run
+      return refreshRun().then(function () { return runLive() ? pollEpisode() : null; });
+    }).then(schedule).catch(function (e) {
+      console.error('follow catch-up failed', e);
+    });
   }
   emit('follow');
   if (on) emit('cursor');
@@ -575,13 +624,12 @@ function parseHash() {
 function applyHash() {
   const h = parseHash();
   if (!h.run) {
-    autoPicked = true;
-    if (state.run) selectRun(null);
+    if (state.run) selectRun(null, { follow: true }).then(loadRuns);
     return;
   }
   if (h.run !== state.run) {
-    autoPicked = true;
-    selectRun(h.run, { ep: h.ep, step: h.step });
+    // A link without #step was written while following: keep following (a newer live run wins).
+    selectRun(h.run, { ep: h.ep, step: h.step, follow: h.step == null }).then(loadRuns);
     return;
   }
   if (h.ep && h.ep !== state.ep) {
@@ -605,9 +653,9 @@ function setText(el, text) {
 
 function render() {
   if (!els) return;
+  renderBanners(); // before the pickers: the follow note defers to the live banner
   renderPickers();
   renderStatus();
-  renderBanners();
   renderEvents();
   renderImages();
   renderCursorBar();
@@ -677,9 +725,32 @@ function renderPickers() {
     sel.disabled = !eps.length;
   }
 
+  // Follow on a run that is not live (it ended, or it is still loading) is never shown lit: "run ended".
+  const ended = !!state.run && state.follow && !!state.runInfo && !runLive();
   els.follow.setAttribute('aria-pressed', state.follow ? 'true' : 'false');
+  els.follow.setAttribute('data-state', ended ? 'ended' : (state.follow && runLive() ? 'live' : 'off'));
   els.follow.disabled = !state.run;
-  setText(els.followNote, state.run && runLive() && !state.follow ? 'live data paused while follow is off' : '');
+  setText(els.followLabel, ended ? 'run ended' : 'LIVE follow');
+  els.follow.title = ended
+    ? 'This run has ended. Follow stays on: the next live run opens by itself. Click to turn follow off.'
+    : 'Stick to the newest step of a live run';
+  let note = '';
+  if (ended) note = 'the next live run opens by itself';
+  else if (state.run && runLive() && !state.follow && !els.liveBanner.textContent) note = 'live data paused while follow is off';
+  setText(els.followNote, note);
+  renderLiveAge();
+}
+
+function renderLiveAge() {
+  const age = liveStepAge();
+  const show = age !== null && age > STALE_STEP_S;
+  els.liveAge.hidden = !show;
+  if (!show) {
+    setText(els.liveAge, '');
+    return;
+  }
+  const n = Math.round(age);
+  setText(els.liveAge, 'last step ' + (n < 120 ? n + ' s' : Math.round(n / 60) + ' min') + ' ago');
 }
 
 function config() {
@@ -741,11 +812,18 @@ function renderBanners() {
   const info = episodeInfo();
   els.dryBanner.hidden = !(info && info.dry_run);
 
+  // Follow off and some run is live (another one, or this one again): offer it instead of switching.
+  const target = state.follow ? null : followTarget();
+  const offer = target && (target.name !== state.run || !runLive()) ? target.name : '';
+  els.liveBanner.hidden = !offer;
+  els.liveBanner.setAttribute('data-run', offer);
+  setText(els.liveBanner, offer ? 'run ' + offer + ' is live \u2014 click to follow' : '');
+
   let text = '';
   if (!state.run) {
-    text = state.runs.length
-      ? 'No run selected. Pick one above; a live run is selected automatically.'
-      : 'No run selected, and no runs found yet. This list refreshes every few seconds.';
+    if (!state.runs.length) text = 'No run selected, and no runs found yet. This list refreshes every few seconds.';
+    else if (state.follow) text = 'No run selected. Pick one above; a live run is selected automatically.';
+    else text = 'No run selected. Pick one above.';
   } else if (!state.ep) {
     if (!state.runInfo) {
       text = 'Waiting for run data.';
@@ -903,7 +981,10 @@ function init() {
     runKind: $('run-kind'),
     epSelect: $('ep-select'),
     follow: $('follow'),
+    followLabel: $('follow-label'),
     followNote: $('follow-note'),
+    liveAge: $('live-age'),
+    liveBanner: $('live-banner'),
     net: $('net-note'),
     modeChip: $('mode-chip'),
     modeText: $('mode-text'),
@@ -940,9 +1021,17 @@ function init() {
   });
 
   els.runSelect.addEventListener('change', function () {
-    autoPicked = true;
-    selectRun(els.runSelect.value || null, {});
+    const name = els.runSelect.value || null;
+    // A picked run is followed iff it is live; "select a run" stops following (a live run is offered instead).
+    selectRun(name, name ? {} : { follow: false });
     els.runSelect.blur(); // a focused select swallows the step keys and changes its option on arrow keys
+  });
+  els.liveBanner.addEventListener('click', function () {
+    const name = els.liveBanner.getAttribute('data-run');
+    els.liveBanner.blur();
+    if (!name) return;
+    if (name === state.run) setFollow(true);
+    else selectRun(name, { follow: true });
   });
   els.epSelect.addEventListener('change', function () {
     const name = els.epSelect.value;
@@ -976,12 +1065,10 @@ async function start() {
     await ensureLabels();
     const h = parseHash();
     if (h.run) {
-      autoPicked = true;
-      await selectRun(h.run, { ep: h.ep, step: h.step });
-      loadRuns();
-    } else {
-      await loadRuns();
+      // A link without #step was written while following: keep following (a newer live run wins).
+      await selectRun(h.run, { ep: h.ep, step: h.step, follow: h.step == null });
     }
+    await loadRuns();
   } catch (e) {
     console.error('start failed', e);
   }

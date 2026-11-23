@@ -372,7 +372,11 @@ class Handler(BaseHTTPRequestHandler):
             step = record.get("step")
             if isinstance(step, int) and step >= first:
                 out.append({**record, "chunk_k": chunk_k, "row": row, "clamped": bool(clamped)})
-        return {"steps": out}
+        # Seconds since steps.jsonl was last written, on the server's clock: the page shows "last step N s ago" when a
+        # live episode stops growing (a killed client leaves no run_end).
+        sig = _sig(ep_dir / "steps.jsonl")
+        age = None if sig is None else max(0.0, time.time() - sig[0] / 1e9)
+        return {"steps": out, "age_s": age}
 
     def _chunks(self, ep_dir: Path, first: int) -> dict:
         chunks = self.server.episode(ep_dir).read_chunks()

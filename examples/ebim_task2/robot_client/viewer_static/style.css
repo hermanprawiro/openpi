@@ -79,10 +79,21 @@ select:focus-visible, button:focus-visible, input:focus-visible {
   width: 10px; height: 10px; border-radius: 50%;
   border: 2px solid var(--muted); background: transparent;
 }
-#follow[aria-pressed="true"] { border-color: var(--mode-run); background: #eaf2fc; }
-#follow[aria-pressed="true"] .dot { background: var(--mode-run); border-color: var(--mode-run); }
+#follow[data-state="live"] { border-color: var(--mode-run); background: #eaf2fc; }
+#follow[data-state="live"] .dot { background: var(--mode-run); border-color: var(--mode-run); }
+/* follow is on but the run has ended: never lit */
+#follow[data-state="ended"] { border-style: dashed; color: var(--ink-2); }
+#follow[data-state="ended"] .dot { border-style: dashed; }
 
 .note { color: var(--muted); font-size: 12px; }
+.note-warn {
+  background: var(--amber);
+  color: var(--amber-ink);
+  border-radius: 3px;
+  padding: 1px 8px;
+  font-weight: 600;
+}
+.note-warn[hidden] { display: none; }
 #net-note:not(:empty) {
   background: #ecebe6;
   border-radius: 3px;
@@ -137,6 +148,9 @@ select:focus-visible, button:focus-visible, input:focus-visible {
 .banner[hidden] { display: none; }
 .banner-dry { background: #fdf3d6; border-color: #e1c15a; color: #3a2b00; font-weight: 600; }
 .banner-info { background: #eef1f5; border-color: #cdd5e0; color: var(--ink-2); }
+button.banner { display: block; width: 100%; text-align: left; font: inherit; min-height: 0; }
+.banner-live { background: #eaf2fc; border-color: var(--mode-run); color: var(--ink); font-weight: 600; cursor: pointer; }
+button.banner-live:hover:not(:disabled) { background: #dbe9f9; }
 
 /* ---- run events ---- */
 #run-events {
