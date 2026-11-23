@@ -9,7 +9,8 @@
 //   mountPlots(root)  build the UI into root's #timeline, #arms and #health and subscribe to app.js.
 //   chunkAt(step)     k of the chunk shown at a step (the step's own chunk_k, else the newest chunk received at
 //                     or before it), or null.
-//   plotStats         {frames, builds, lastMs, maxMs, buildMs}: drawing cost counters (for checks; not shown).
+//   plotStats         {frames, builds, bases (base layers drawn), lastMs, maxMs, buildMs}: drawing cost counters
+//                     (for checks; not shown).
 
 import { state, onChange, stepIndex, setCursor, setSelectedDim, episodeInfo, modeColor, MODES } from './app.js';
 
@@ -50,7 +51,7 @@ const MINUS = '−';
 // Text inside a mode fill: near-black on the light fills, white on the dark ones.
 const MODE_INK = { run: '#ffffff', wait: '#0b0b0b', leash: '#0b0b0b', hold: '#0b0b0b', paused: '#ffffff' };
 
-export const plotStats = { frames: 0, builds: 0, lastMs: 0, maxMs: 0, buildMs: 0 };
+export const plotStats = { frames: 0, builds: 0, bases: 0, lastMs: 0, maxMs: 0, buildMs: 0 };
 
 // ---------------------------------------------------------------- data (typed arrays)
 
@@ -293,14 +294,19 @@ function indexAtT(t) {
   return t - d.t[i - 1] <= d.t[i] - t ? i - 1 : i;
 }
 
+// Rebuild the typed arrays when the data changed. Whoever triggers the rebuild (the plots' own listener, a frame,
+// or an outside chunkAt() call) also raises the redraw flags, so the redraw signal can never be consumed silently.
 function ensureData() {
   const sig = signature();
-  if (sig !== dataSig || !D) {
-    dataSig = sig;
-    build();
-    return true;
+  if (sig === dataSig && D) return false;
+  dataSig = sig;
+  build();
+  dirty.size = dirty.tlBase = dirty.base = dirty.over = true;
+  if (roots) {
+    updateTitles();
+    schedule();
   }
-  return false;
+  return true;
 }
 
 export function chunkAt(step) {
@@ -1021,6 +1027,7 @@ function frame() {
     if (c.kind === 'timeline') drawTimelineBase(c, full);
     else if (c.kind === 'joint' || c.kind === 'gripper') drawJointBase(c, win, range);
     else drawHealthBase(c, win, range);
+    plotStats.bases += 1;
     if (performance.now() - t0 > BASE_BUDGET_MS) break;
   }
   if (dirty.over) {
@@ -1426,12 +1433,7 @@ export function mountPlots(root) {
       return;
     }
     if (kind === 'selection' || kind === 'run') buildArms();
-    const sig = signature();
-    if (sig !== dataSig) {
-      ensureData(); // rebuild the typed arrays now, so chunkAt() and the titles are current right away
-      updateTitles();
-      dirty.size = dirty.tlBase = dirty.base = dirty.over = true;
-    }
+    ensureData(); // rebuilds (and flags the redraw) only when the data changed
     if (state.cursor !== lastCursor) {
       lastCursor = state.cursor;
       dirty.over = true;
