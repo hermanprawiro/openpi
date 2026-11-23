@@ -49,12 +49,6 @@ def create_trained_policy(
     weight_path = os.path.join(checkpoint_dir, "model.safetensors")
     is_pytorch = os.path.exists(weight_path)
 
-    logging.info("Loading model...")
-    if is_pytorch:
-        model = train_config.model.load_pytorch(train_config, weight_path)
-        model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
-    else:
-        model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
     if norm_stats is None:
         # We are loading the norm stats from the checkpoint instead of the config assets dir to make sure
@@ -62,6 +56,15 @@ def create_trained_policy(
         if data_config.asset_id is None:
             raise ValueError("Asset id is required to load norm stats.")
         norm_stats = _checkpoints.load_norm_stats(checkpoint_dir / "assets", data_config.asset_id)
+    # Before the (slow) model load: refuse a checkpoint whose norm stats belong to another config's layout.
+    data_config.check_norm_stats(norm_stats, f"{checkpoint_dir}/assets")
+
+    logging.info("Loading model...")
+    if is_pytorch:
+        model = train_config.model.load_pytorch(train_config, weight_path)
+        model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
+    else:
+        model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
 
     # Determine the device to use for PyTorch models
     if is_pytorch and pytorch_device is None:

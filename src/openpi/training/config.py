@@ -70,6 +70,8 @@ class DataConfig:
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
     norm_stats: dict[str, _transforms.NormStats] | None = None
+    # If set, the state and action norm stats must have exactly this many dims (see check_norm_stats).
+    norm_stats_dim: int | None = None
 
     # Used to adopt the inputs from a dataset specific format to a common format
     # which is expected by the data transforms.
@@ -97,6 +99,26 @@ class DataConfig:
     action_space: droid_rlds_dataset.DroidActionSpace | None = None
     # List of datasets to sample from: name, version, weight, and optionally filter_dict_path
     datasets: Sequence[droid_rlds_dataset.RLDSDataset] = ()
+
+    def check_norm_stats(self, norm_stats: dict[str, _transforms.NormStats] | None, source: str) -> None:
+        """Raise if `norm_stats` (loaded from `source`) do not have `norm_stats_dim` dims.
+
+        Norm stats are computed in the model-facing layout, so their width identifies the layout a checkpoint was
+        trained in. Configs that share an architecture (e.g. the Munich full fine-tunes from pi05_base and from the
+        sim checkpoint) would otherwise load each other's checkpoints silently and map joints to the wrong slots.
+        """
+        if self.norm_stats_dim is None or norm_stats is None:
+            return
+        for key in ("state", "actions"):
+            if key not in norm_stats:
+                continue
+            dim = len(norm_stats[key].mean)
+            if dim != self.norm_stats_dim:
+                raise ValueError(
+                    f"{key} norm stats are {dim}-dim, but this config expects {self.norm_stats_dim} "
+                    f"(from {source}). The checkpoint or assets were most likely produced with a different config; "
+                    "serve or train with the config named by the checkpoint's first directory level."
+                )
 
 
 class GroupFactory(Protocol):
@@ -427,12 +449,16 @@ class LeRobotEbimTask2DataConfig(DataConfigFactory):
 
         model_transforms = ModelTransformFactory()(model_config)
 
-        return dataclasses.replace(
+        data_config = dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+            # Width of the model-facing layout, which is what the norm stats are computed on.
+            norm_stats_dim=ebim_task2_policy.ACTION_DIM if self.sim_layout_remap else self.action_dim,
         )
+        data_config.check_norm_stats(data_config.norm_stats, f"{assets_dirs}/{data_config.asset_id}")
+        return data_config
 
 
 @dataclasses.dataclass(frozen=True)

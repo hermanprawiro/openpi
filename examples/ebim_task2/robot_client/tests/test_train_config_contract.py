@@ -81,3 +81,56 @@ def test_sim_layout_remap_needs_absolute_munich16(action_dim, delta):
     )
     with pytest.raises(ValueError, match="sim_layout_remap"):
         data_config.create(pathlib.Path("/nonexistent_assets"), pi0_config.Pi0Config(pi05=True))
+
+
+def _write_norm_stats(directory, dim):
+    import numpy as np
+
+    from openpi.shared import normalize
+
+    stats = normalize.NormStats(mean=np.zeros(dim), std=np.ones(dim), q01=-np.ones(dim), q99=np.ones(dim))
+    normalize.save(directory, {"state": stats, "actions": stats})
+
+
+@pytest.mark.parametrize(
+    ("config_name", "wrong_dim"),
+    [("pi05_ebim_task2_munich_real", 20), ("pi05_ebim_task2_munich_real_from_sim", 16)],
+)
+def test_server_refuses_checkpoint_with_other_configs_norm_stats(tmp_path, config_name, wrong_dim):
+    """A from_sim checkpoint served with the 16-dim config (or the reverse) must fail before the model loads."""
+    from openpi.policies import policy_config
+
+    _write_norm_stats(tmp_path / "assets" / "ebim" / "task2_munich_real", wrong_dim)
+    # No params/ in tmp_path: reaching the model load would raise something else, so the norm stats check runs first.
+    with pytest.raises(ValueError, match=rf"state norm stats are {wrong_dim}-dim"):
+        policy_config.create_trained_policy(_config.get_config(config_name), tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("config_name", "dim"),
+    [
+        ("pi05_ebim_task2_munich_real", 16),
+        ("pi05_lora_ebim_task2_munich_real", 16),
+        ("pi05_ebim_task2_munich_real_from_sim", 20),
+        ("pi05_ebim_task2_fixpos_200_and_v5", 20),
+    ],
+)
+def test_norm_stats_dim_matches_each_config(tmp_path, config_name, dim):
+    import numpy as np
+
+    cfg = _config.get_config(config_name)
+    data = cfg.data.create(pathlib.Path("/nonexistent_assets"), cfg.model)
+    assert data.norm_stats_dim == dim
+    _write_norm_stats(tmp_path, dim)
+    from openpi.shared import normalize
+
+    data.check_norm_stats(normalize.load(tmp_path), "test")  # matching dims: no error
+    with pytest.raises(ValueError, match="norm stats"):
+        data.check_norm_stats({"state": normalize.NormStats(mean=np.zeros(dim + 4), std=np.ones(dim + 4))}, "test")
+
+
+def test_training_refuses_assets_with_other_configs_norm_stats(tmp_path):
+    cfg = _config.get_config("pi05_ebim_task2_munich_real_from_sim")
+    _write_norm_stats(tmp_path / cfg.name / "ebim" / "task2_munich_real", 16)
+    with pytest.raises(ValueError, match="state norm stats are 16-dim"):
+        cfg.data.create(tmp_path / cfg.name, cfg.model)
