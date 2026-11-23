@@ -2,10 +2,82 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>EBIM task2 run viewer</title>
+<link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<h1>EBIM task2 run viewer</h1>
-<p>Placeholder page; the frontend arrives in a later task.</p>
+
+<header id="bar">
+  <div class="row">
+    <label class="field">Run <select id="run-select"></select></label>
+    <span id="run-kind" class="muted"></span>
+    <label class="field">Episode <select id="ep-select"></select></label>
+    <button id="follow" type="button" aria-pressed="false" title="Stick to the newest step of a live run">
+      <span class="dot" aria-hidden="true"></span>LIVE follow
+    </button>
+    <span id="follow-note" class="note"></span>
+    <span id="net-note" class="note" role="status"></span>
+  </div>
+  <div class="row" id="status">
+    <span id="mode-chip" class="chip" data-mode=""><span class="swatch"></span><span id="mode-text">&ndash;</span></span>
+    <span id="mode-reason" class="muted"></span>
+    <span class="kv">queue <b id="st-queue">&ndash;</b></span>
+    <span class="kv">in-flight <b id="st-inflight">&ndash;</b></span>
+    <span class="kv">dry <b id="st-dry">&ndash;</b></span>
+    <span class="kv" id="st-ckpt-wrap">ckpt <b id="st-ckpt">&ndash;</b></span>
+    <span class="kv"><b id="st-sync">&ndash;</b></span>
+    <span id="badge" class="badge" hidden></span>
+  </div>
+</header>
+
+<div id="banners">
+  <div id="dry-banner" class="banner banner-dry" hidden>DRY RUN &mdash; the arms do not move; measured joints stay flat</div>
+  <div id="gate-banner" class="banner banner-info" hidden></div>
+</div>
+
+<section id="run-events" aria-label="Run events" hidden></section>
+
+<main>
+  <section id="images" aria-label="Camera frames">
+    <figure class="cam" data-camera="head">
+      <div class="frame"><img alt="head camera" width="224" height="224"><div class="placeholder">no frame</div></div>
+      <figcaption><b>head</b> <span class="cap"></span></figcaption>
+    </figure>
+    <figure class="cam" data-camera="wrist_left">
+      <div class="frame"><img alt="left wrist camera" width="224" height="224"><div class="placeholder">no frame</div></div>
+      <figcaption><b>wrist_left</b> <span class="cap"></span></figcaption>
+    </figure>
+    <figure class="cam" data-camera="wrist_right">
+      <div class="frame"><img alt="right wrist camera" width="224" height="224"><div class="placeholder">no frame</div></div>
+      <figcaption><b>wrist_right</b> <span class="cap"></span></figcaption>
+    </figure>
+  </section>
+
+  <!-- Mount point (Task 6, plots.js): mode band timeline. -->
+  <section id="timeline"></section>
+
+  <section id="cursor-bar" aria-label="Cursor">
+    <button id="play" type="button" title="Play / pause (space), 20 steps/s">Play</button>
+    <input id="scrub" type="range" min="0" max="0" step="1" value="0" disabled aria-label="Step cursor">
+    <span id="cursor-readout" class="muted">no steps</span>
+  </section>
+
+  <!-- Mount point (Task 6, plots.js): measured / commanded / plan per joint, right arm and left arm. -->
+  <section id="arms"></section>
+
+  <!-- Mount point (Task 7, inspector.js): chunk inspector for the chunk at the cursor. -->
+  <section id="inspector"></section>
+
+  <!-- Mount point (Task 6, plots.js): queue / in_flight / dry_s and chunk latency. -->
+  <section id="health"></section>
+
+  <!-- Mount point (Task 7, inspector.js): result.json, stream_stats.json, recorder errors. -->
+  <section id="result"></section>
+</main>
+
+<footer id="keys" class="muted">Keys: &larr;/&rarr; one step, Shift+&larr;/&rarr; 20 steps, space play/pause.</footer>
+
+<script type="module" src="/static/app.js"></script>
 </body>
 </html>
