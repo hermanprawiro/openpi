@@ -115,18 +115,22 @@ assuming `step == plan_step`):
 - **Sync** (`inference.mode: sync`, Munich): row 0 executes on the first `run` tick at/after receipt; rows
   advance one per `run` tick (`wait`/`leash`/`hold`/`paused` ticks pop nothing); only rows
   `0 … execute_horizon-1` can execute; a HOLD drops the queue (rows after the HOLD are unexecuted).
-- **Async**: rows < `latency_steps` are stale (shown greyed), the rest map to `obs_step + i` in plan steps;
-  executed values may be blended across chunks, so "executed" is always the recorded `action`, never a row.
-- Verification: each executed `action` is compared with the row the reconstruction assigns (float32
-  tolerance). Mismatch count is shown in the inspector ("alignment: 0 mismatches" / "N mismatches — blended or
-  unknown"). This guards the reconstruction instead of trusting it.
+- **Async**: a first chunk (after start/HOLD) is loaded without skip at its receipt, so row r runs at receipt
+  plan step + r; later chunks skip `latency_steps` rows (greyed) and row r maps to `obs_step + r`. Mapping by
+  plan step only; executed values may be blended, so "executed" is always the recorded `action`.
+- A first chunk that fails the start check is recorded but its receipt tick is not (FREEZE before `_record`):
+  the receipt is inferred as the tick after the last record, flagged "not recorded".
+- Verification (sync): each executed `action` is compared with the row the reconstruction assigns (float32
+  tolerance); the mismatch count is shown in the inspector. This guards the reconstruction instead of trusting
+  it. Async shows no mismatch count.
 
 ### Server — `robot_client/viewer.py` (stdlib `http.server`, numpy; pyyaml optional)
 
 - `python3 -m robot_client.viewer --runs <dir> [--host 127.0.0.1] [--port 8765]`.
 - `ThreadingHTTPServer`. Endpoints (JSON is NaN/Inf-safe: non-finite → null):
-  - `GET /api/runs` → `[{name, kind, mtime, live}]`, newest first. `live` = has `run_start`, no `run_end`, and a
-    file modified in the last 10 s.
+  - `GET /api/runs` → `[{name, kind, mtime, live}]`, newest first. `live` = has `run_start`, no `run_end`, and
+    `events.log` / the last `steps.jsonl` modified within 2 h (the client is silent at the start gate; a crash
+    leaves no `run_end`).
   - `GET /api/runs/<run>` → config summary (`active_arms`, inference mode/execute_horizon, `state.pin`, safety
     thresholds `max_start_offset_rad`, `infer_dry_freeze_s`, `max_step_rad`, …), server metadata, events,
     episodes `[{name, ended_by, reason, outcome, live}]`, check-obs images if present.
